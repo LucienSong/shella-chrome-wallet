@@ -4,34 +4,49 @@ Post-quantum Chrome wallet extension for [Shell Chain](https://github.com/Lucien
 
 ## Features
 
-- 🔐 ML-DSA-65 (Dilithium) post-quantum key generation
-- 🗝️ Keystore import/export (argon2id + xchacha20-poly1305)
-- 💸 Send / receive Shell Chain transactions
-- 🌐 Configurable RPC endpoint (devnet / testnet / mainnet)
-- ⚡ Built on Manifest V3
+- 🔐 **ML-DSA-65 key management** — generate or import post-quantum keypairs; addresses in `pq1...` bech32m format
+- 🔑 **Password-protected keystore** — argon2id KDF + xchacha20-poly1305 encryption; compatible with Shell CLI keystore format
+- 🔒 **Auto-lock** — configurable inactivity timeout via chrome.alarms; keys kept only in `chrome.storage.session`
+- 💸 **Send transactions** — input recipient + amount → build → sign → broadcast via shell-sdk
+- 📥 **Receive** — display full address with one-click copy
+- 📜 **Transaction history** — query `shell_getTransactionsByAddress` and display recent activity
+- 🌐 **Multi-network** — switch between devnet / testnet / mainnet or configure a custom RPC URL
+- ⚡ **Manifest V3** — service worker background, strict CSP, no eval
 
 ## Project Structure
 
 ```
-manifest.json          Chrome extension manifest (MV3)
-popup.html / popup.css Extension popup UI
+manifest.json          MV3 manifest (permissions: storage, alarms)
+popup.html             Extension popup shell (360×600)
+popup.css              Dark-theme styles
+icons/                 Extension icons (16, 48, 128px)
 src/
-  popup.ts             Popup entry point
-  background.ts        Service worker (signing, RPC)
-  store.ts             chrome.storage.local wrapper
+  popup.ts             Multi-view SPA entry point
+  background.ts        Service worker — key lifecycle, signing, RPC
+  store.ts             chrome.storage.local/session wrapper
+  crypto.ts            Pure-JS keystore create/decrypt (no WASM)
+scripts/
+  bundle.js            esbuild bundler → dist/
+dist/                  Built extension (load as unpacked)
 ```
 
 ## Development
 
 ```bash
+# Requires shell-sdk to be checked out at ../shell-sdk (sibling directory)
 npm install
-npm run build        # compile TypeScript → dist/
+npm run build        # esbuild → dist/popup.js + dist/background.js
+npm run typecheck    # tsc --noEmit
+npm run lint         # eslint src/
 ```
 
-Load `dist/` as an unpacked extension in `chrome://extensions`.
+Load the project root as an **unpacked extension** in `chrome://extensions` (enable Developer mode).
+
+> **Note:** `dist/background.js` is ~3.7 MB due to bundled ML-DSA-65 + Argon2id crypto. This is expected.
 
 ## Dependencies
 
-- [`shell-sdk`](https://github.com/LucienSong/shell-sdk) — PQ signing + AA tx builders
-- [`viem`](https://viem.sh) — Ethereum primitives
-- [`@noble/post-quantum`](https://github.com/paulmillr/noble-post-quantum) — ML-DSA-65
+- [`shell-sdk`](https://github.com/LucienSong/shell-sdk) — ML-DSA-65 adapter, ShellSigner, provider, tx builders
+- [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) — Argon2id KDF (pure JS)
+- [`@noble/ciphers`](https://github.com/paulmillr/noble-ciphers) — XChaCha20-Poly1305 (pure JS)
+- [`viem`](https://viem.sh) — Ethereum primitives (hex, encoding)

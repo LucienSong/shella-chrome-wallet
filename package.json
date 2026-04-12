@@ -5,24 +5,38 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/bundle.js",
-    "dev": "tsc -p tsconfig.json --watch",
+    "build": "node scripts/bundle.js",
+    "build:prod": "node scripts/bundle.js --prod",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist"
   },
-  "keywords": ["shell-chain", "wallet", "chrome-extension", "pq", "web3"],
+  "keywords": [
+    "shell-chain",
+    "wallet",
+    "chrome-extension",
+    "pq",
+    "web3"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LucienSong/shella-chrome-wallet.git"
   },
   "dependencies": {
-    "shell-sdk": "github:LucienSong/shell-sdk",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "shell-sdk": "file:../shell-sdk",
     "viem": "^2.39.0"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.325",
     "@types/node": "^24.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.58.1",
+    "@typescript-eslint/parser": "^8.58.1",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.2.0",
+    "prettier": "^3.8.2",
     "typescript": "^5.9.0"
   }
 }

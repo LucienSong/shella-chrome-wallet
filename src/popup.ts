@@ -1,43 +1,727 @@
 /**
  * Shella Wallet — popup entry point.
- * Renders the wallet UI inside the Chrome extension popup.
+ * Multi-view SPA rendered into #app.
  */
 
-import { getAccounts, getNetwork } from './store.js';
+type View =
+  | 'loading'
+  | 'welcome'
+  | 'create-password'
+  | 'create-generating'
+  | 'create-success'
+  | 'import-file'
+  | 'import-password'
+  | 'locked'
+  | 'wallet'
+  | 'send'
+  | 'receive'
+  | 'history'
+  | 'settings';
 
-async function main() {
-  const app = document.getElementById('app');
-  if (!app) return;
+interface AppState {
+  view: View;
+  pqAddress: string;
+  hexAddress: string;
+  balance: string;
+  balanceFormatted: string;
+  network: { name: string; chainId: number; rpcUrl: string };
+  txHistory: TxRecord[];
+  error: string;
+  toast: string;
+  // Temp fields for flows
+  pendingKeystoreJson: string;
+  sendTo: string;
+  sendValue: string;
+}
 
-  const [accounts, network] = await Promise.all([getAccounts(), getNetwork()]);
+interface TxRecord {
+  hash?: string;
+  from?: string;
+  to?: string;
+  value?: string;
+  timestamp?: number;
+  status?: string;
+}
 
-  if (accounts.length === 0) {
-    app.innerHTML = `
-      <div class="welcome">
-        <h1>Shella Wallet</h1>
-        <p>Post-quantum wallet for Shell Chain</p>
-        <button id="create-btn">Create Wallet</button>
-        <button id="import-btn">Import Keystore</button>
-      </div>
-    `;
-    document.getElementById('create-btn')?.addEventListener('click', () => {
-      chrome.runtime.sendMessage({ type: 'CREATE_WALLET' });
+const state: AppState = {
+  view: 'loading',
+  pqAddress: '',
+  hexAddress: '',
+  balance: '0',
+  balanceFormatted: '0.000000',
+  network: { name: 'Shell Devnet', chainId: 424242, rpcUrl: 'http://127.0.0.1:8545' },
+  txHistory: [],
+  error: '',
+  toast: '',
+  pendingKeystoreJson: '',
+  sendTo: '',
+  sendValue: '',
+};
+
+function send<T = unknown>(type: string, data: Record<string, unknown> = {}): Promise<T> {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type, ...data }, (response: T & { error?: string }) => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+      if (response?.error) return reject(new Error(response.error));
+      resolve(response);
     });
-    document.getElementById('import-btn')?.addEventListener('click', () => {
-      chrome.runtime.sendMessage({ type: 'IMPORT_KEYSTORE' });
-    });
-    return;
-  }
+  });
+}
 
-  const address = accounts[0];
-  app.innerHTML = `
-    <div class="wallet">
-      <div class="network">${network.name} (chainId: ${network.chainId})</div>
-      <div class="address" title="${address}">${address.slice(0, 10)}…${address.slice(-8)}</div>
-      <button id="send-btn">Send</button>
-      <button id="receive-btn">Receive</button>
+function app(): HTMLElement {
+  return document.getElementById('app')!;
+}
+
+function showToast(msg: string, isError = false): void {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = 'toast' + (isError ? ' toast-error' : ' toast-ok');
+  el.style.display = 'block';
+  setTimeout(() => {
+    el.style.display = 'none';
+  }, 3000);
+}
+
+function truncate(addr: string, start = 10, end = 8): string {
+  if (!addr || addr.length <= start + end + 3) return addr;
+  return addr.slice(0, start) + '…' + addr.slice(-end);
+}
+
+function render(): void {
+  const views: Record<View, () => string> = {
+    loading: renderLoading,
+    welcome: renderWelcome,
+    'create-password': renderCreatePassword,
+    'create-generating': renderGenerating,
+    'create-success': renderCreateSuccess,
+    'import-file': renderImportFile,
+    'import-password': renderImportPassword,
+    locked: renderLocked,
+    wallet: renderWallet,
+    send: renderSend,
+    receive: renderReceive,
+    history: renderHistory,
+    settings: renderSettings,
+  };
+  app().innerHTML = `
+    <div id="toast" class="toast" style="display:none"></div>
+    ${views[state.view]?.() ?? renderLoading()}
+  `;
+  attachHandlers();
+}
+
+function renderLoading(): string {
+  return `<div class="center"><div class="spinner"></div><p>Loading…</p></div>`;
+}
+
+function renderWelcome(): string {
+  return `
+    <div class="welcome">
+      <div class="logo">🔐</div>
+      <h1>Shella Wallet</h1>
+      <p class="subtitle">Post-quantum wallet for Shell Chain</p>
+      <button id="btn-create" class="btn-primary">Create New Wallet</button>
+      <button id="btn-import" class="btn-secondary">Import Keystore</button>
     </div>
   `;
 }
 
-main().catch(console.error);
+function renderCreatePassword(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Set Password</h2>
+      <p class="hint">Protects your wallet on this device. Minimum 8 characters.</p>
+      <label>Password
+        <input type="password" id="pwd1" placeholder="Enter password" autocomplete="new-password" />
+      </label>
+      <label>Confirm Password
+        <input type="password" id="pwd2" placeholder="Confirm password" autocomplete="new-password" />
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-confirm-pwd" class="btn-primary">Create Wallet</button>
+    </div>
+  `;
+}
+
+function renderGenerating(): string {
+  return `
+    <div class="center">
+      <div class="spinner"></div>
+      <h2>Generating Key Pair</h2>
+      <p class="hint">Using ML-DSA-65 post-quantum algorithm…</p>
+    </div>
+  `;
+}
+
+function renderCreateSuccess(): string {
+  return `
+    <div class="view-form success-view">
+      <div class="success-icon">✅</div>
+      <h2>Wallet Created!</h2>
+      <p class="hint">Your post-quantum wallet is ready.</p>
+      <div class="address-box">
+        <span class="label">Address</span>
+        <span class="address monospace" id="addr-display">${truncate(state.pqAddress)}</span>
+        <button class="btn-copy" id="btn-copy-addr" title="Copy address">⧉</button>
+      </div>
+      <div class="info-box">
+        <strong>⚠️ Backup Reminder</strong>
+        <p>Export your keystore file and store it safely. It's the only way to recover your wallet.</p>
+      </div>
+      <button id="btn-export-ks" class="btn-secondary">Export Keystore</button>
+      <button id="btn-goto-wallet" class="btn-primary">Open Wallet</button>
+    </div>
+  `;
+}
+
+function renderImportFile(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Import Keystore</h2>
+      <p class="hint">Select a Shell CLI keystore JSON file.</p>
+      <div class="file-drop" id="file-drop">
+        <input type="file" id="ks-file" accept=".json,application/json" />
+        <label for="ks-file">
+          📄 Click to choose keystore file
+        </label>
+      </div>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderImportPassword(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Enter Keystore Password</h2>
+      <p class="hint">Enter the password used to encrypt this keystore.</p>
+      <label>Password
+        <input type="password" id="import-pwd" placeholder="Keystore password" autocomplete="current-password" />
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-confirm-import" class="btn-primary">Import Wallet</button>
+    </div>
+  `;
+}
+
+function renderLocked(): string {
+  return `
+    <div class="view-form">
+      <div class="logo">🔒</div>
+      <h2>Wallet Locked</h2>
+      <p class="hint">${truncate(state.pqAddress) || 'Enter your password to unlock.'}</p>
+      <label>Password
+        <input type="password" id="unlock-pwd" placeholder="Enter password" autocomplete="current-password" autofocus />
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-unlock" class="btn-primary">Unlock</button>
+    </div>
+  `;
+}
+
+function renderWallet(): string {
+  return `
+    <div class="wallet-view">
+      <div class="wallet-header">
+        <div class="network-badge" id="btn-settings">${state.network.name}</div>
+        <button class="btn-icon" id="btn-lock" title="Lock wallet">🔒</button>
+      </div>
+      <div class="address-box">
+        <span class="monospace address-short">${truncate(state.pqAddress)}</span>
+        <button class="btn-copy" id="btn-copy-addr" title="Copy address">⧉</button>
+      </div>
+      <div class="balance-section">
+        <span class="balance-amount">${state.balanceFormatted}</span>
+        <span class="balance-unit">SHELL</span>
+        <button class="btn-refresh" id="btn-refresh" title="Refresh balance">↻</button>
+      </div>
+      <div class="action-row">
+        <button class="btn-action" id="btn-send">
+          <span>↑</span>Send
+        </button>
+        <button class="btn-action" id="btn-receive">
+          <span>↓</span>Receive
+        </button>
+        <button class="btn-action" id="btn-history">
+          <span>☰</span>History
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderSend(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Send SHELL</h2>
+      <label>To Address (pq1… or 0x…)
+        <input type="text" id="send-to" placeholder="pq1…" value="${state.sendTo}" />
+      </label>
+      <label>Amount (SHELL)
+        <input type="number" id="send-value" placeholder="0.0" step="any" min="0" value="${state.sendValue}" />
+      </label>
+      <div class="fee-info">
+        <span class="label">Est. fee:</span>
+        <span class="fee-amount">~0.000021 SHELL</span>
+      </div>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-send-confirm" class="btn-primary">Send</button>
+    </div>
+  `;
+}
+
+function renderReceive(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Receive SHELL</h2>
+      <p class="hint">Share your address to receive funds.</p>
+      <div class="qr-placeholder">
+        <div class="qr-icon">📲</div>
+      </div>
+      <div class="address-box">
+        <span class="monospace address-full" id="full-addr">${state.pqAddress}</span>
+      </div>
+      <button id="btn-copy-full" class="btn-primary">Copy Address</button>
+      <div class="divider"></div>
+      <div class="address-box" style="margin-top:8px">
+        <span class="label" style="font-size:11px">Hex address (0x)</span>
+        <span class="monospace address-small">${truncate(state.hexAddress, 12, 10)}</span>
+        <button class="btn-copy" id="btn-copy-hex" title="Copy hex address">⧉</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderHistory(): string {
+  const txItems = state.txHistory.length > 0
+    ? state.txHistory.map((tx) => {
+        const dir = tx.from?.toLowerCase() === state.hexAddress.toLowerCase() ? '↑ Sent' : '↓ Received';
+        const val = tx.value ? (parseInt(tx.value, 16) / 1e18).toFixed(6) : '?';
+        const hash = tx.hash ? truncate(tx.hash, 8, 6) : '–';
+        return `
+          <div class="tx-item">
+            <span class="tx-dir">${dir}</span>
+            <span class="tx-hash monospace">${hash}</span>
+            <span class="tx-value">${val} SHELL</span>
+            <span class="tx-status ${tx.status}">${tx.status ?? 'confirmed'}</span>
+          </div>
+        `;
+      }).join('')
+    : '<div class="empty-state">No transactions yet</div>';
+
+  return `
+    <div class="view-list">
+      <div class="view-list-header">
+        <button class="btn-back" id="btn-back">← Back</button>
+        <h2>Transaction History</h2>
+      </div>
+      <div class="tx-list">${txItems}</div>
+    </div>
+  `;
+}
+
+function renderSettings(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Settings</h2>
+
+      <div class="section-title">Network</div>
+      <select id="network-select" class="select-input">
+        <option value="devnet" ${state.network.name === 'Shell Devnet' ? 'selected' : ''}>Shell Devnet (424242)</option>
+        <option value="testnet" ${state.network.name === 'Shell Testnet' ? 'selected' : ''}>Shell Testnet (12345)</option>
+        <option value="mainnet" ${state.network.name === 'Shell Mainnet' ? 'selected' : ''}>Shell Mainnet (100000)</option>
+        <option value="custom">Custom RPC…</option>
+      </select>
+      <div id="custom-rpc-section" style="display:none">
+        <label>Chain ID
+          <input type="number" id="custom-chain-id" placeholder="424242" />
+        </label>
+        <label>RPC URL
+          <input type="text" id="custom-rpc-url" placeholder="http://127.0.0.1:8545" />
+        </label>
+        <label>Network Name
+          <input type="text" id="custom-net-name" placeholder="My Network" />
+        </label>
+        <button id="btn-save-custom" class="btn-secondary">Save Custom RPC</button>
+      </div>
+
+      <div class="section-title" style="margin-top:16px">Security</div>
+      <button id="btn-export-ks" class="btn-secondary">Export Keystore</button>
+      <button id="btn-reset" class="btn-danger">Reset Wallet</button>
+    </div>
+  `;
+}
+
+// ────────── Event handlers ──────────
+
+function attachHandlers(): void {
+  const on = (id: string, ev: string, fn: EventListener) => {
+    document.getElementById(id)?.addEventListener(ev, fn);
+  };
+
+  on('btn-create', 'click', () => {
+    state.error = '';
+    state.view = 'create-password';
+    render();
+  });
+
+  on('btn-import', 'click', () => {
+    state.error = '';
+    state.view = 'import-file';
+    render();
+  });
+
+  on('btn-back', 'click', () => {
+    state.error = '';
+    const backMap: Partial<Record<View, View>> = {
+      'create-password': 'welcome',
+      'import-file': 'welcome',
+      'import-password': 'import-file',
+      send: 'wallet',
+      receive: 'wallet',
+      history: 'wallet',
+      settings: 'wallet',
+    };
+    state.view = backMap[state.view] ?? 'wallet';
+    render();
+  });
+
+  on('btn-confirm-pwd', 'click', async () => {
+    const pwd1 = (document.getElementById('pwd1') as HTMLInputElement)?.value;
+    const pwd2 = (document.getElementById('pwd2') as HTMLInputElement)?.value;
+    if (!pwd1 || pwd1.length < 8) {
+      state.error = 'Password must be at least 8 characters';
+      render();
+      return;
+    }
+    if (pwd1 !== pwd2) {
+      state.error = 'Passwords do not match';
+      render();
+      return;
+    }
+    state.error = '';
+    state.view = 'create-generating';
+    render();
+    try {
+      const res = await send<{ pqAddress: string; hexAddress: string }>('CREATE_WALLET', {
+        password: pwd1,
+      });
+      state.pqAddress = res.pqAddress;
+      state.hexAddress = res.hexAddress;
+      state.view = 'create-success';
+      render();
+    } catch (err) {
+      state.error = (err as Error).message;
+      state.view = 'create-password';
+      render();
+    }
+  });
+
+  on('btn-goto-wallet', 'click', async () => {
+    await refreshWalletData();
+    state.view = 'wallet';
+    render();
+  });
+
+  // File import
+  const fileInput = document.getElementById('ks-file') as HTMLInputElement | null;
+  if (fileInput) {
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const json = e.target?.result as string;
+          JSON.parse(json); // validate
+          state.pendingKeystoreJson = json;
+          state.error = '';
+          state.view = 'import-password';
+          render();
+        } catch {
+          state.error = 'Invalid keystore file';
+          render();
+        }
+      };
+      reader.readAsText(file);
+    });
+  }
+
+  on('btn-confirm-import', 'click', async () => {
+    const pwd = (document.getElementById('import-pwd') as HTMLInputElement)?.value;
+    if (!pwd) {
+      state.error = 'Enter the keystore password';
+      render();
+      return;
+    }
+    state.error = '';
+    state.view = 'create-generating';
+    render();
+    try {
+      const res = await send<{ pqAddress: string; hexAddress: string }>('IMPORT_KEYSTORE', {
+        keystoreJson: state.pendingKeystoreJson,
+        password: pwd,
+      });
+      state.pqAddress = res.pqAddress;
+      state.hexAddress = res.hexAddress;
+      await refreshWalletData();
+      state.view = 'wallet';
+      render();
+      showToast('Wallet imported successfully');
+    } catch (err) {
+      state.error = (err as Error).message;
+      state.view = 'import-password';
+      render();
+    }
+  });
+
+  on('btn-unlock', 'click', async () => {
+    const pwd = (document.getElementById('unlock-pwd') as HTMLInputElement)?.value;
+    if (!pwd) return;
+    state.error = '';
+    try {
+      await send('UNLOCK_WALLET', { password: pwd });
+      await refreshWalletData();
+      state.view = 'wallet';
+      render();
+    } catch (err) {
+      state.error = (err as Error).message;
+      render();
+    }
+  });
+
+  // Enter key on unlock password
+  document.getElementById('unlock-pwd')?.addEventListener('keydown', (e) => {
+    if ((e as KeyboardEvent).key === 'Enter') document.getElementById('btn-unlock')?.click();
+  });
+
+  on('btn-lock', 'click', async () => {
+    await send('LOCK_WALLET');
+    state.view = 'locked';
+    render();
+  });
+
+  on('btn-settings', 'click', () => {
+    state.view = 'settings';
+    render();
+  });
+
+  on('btn-send', 'click', () => {
+    state.sendTo = '';
+    state.sendValue = '';
+    state.error = '';
+    state.view = 'send';
+    render();
+  });
+
+  on('btn-receive', 'click', () => {
+    state.view = 'receive';
+    render();
+  });
+
+  on('btn-history', 'click', async () => {
+    state.view = 'history';
+    render();
+    try {
+      const res = await send<{ txs: TxRecord[] }>('GET_TX_HISTORY', { address: state.pqAddress });
+      state.txHistory = res.txs;
+      render();
+    } catch {
+      // leave empty
+    }
+  });
+
+  on('btn-refresh', 'click', async () => {
+    try {
+      await refreshBalance();
+      render();
+      showToast('Balance refreshed');
+    } catch (err) {
+      showToast((err as Error).message, true);
+    }
+  });
+
+  on('btn-send-confirm', 'click', async () => {
+    const to = (document.getElementById('send-to') as HTMLInputElement)?.value?.trim();
+    const value = (document.getElementById('send-value') as HTMLInputElement)?.value?.trim();
+    if (!to || !value) {
+      state.error = 'Enter recipient address and amount';
+      render();
+      return;
+    }
+    state.error = '';
+    state.sendTo = to;
+    state.sendValue = value;
+    try {
+      const res = await send<{ txHash: string }>('SEND_TX', { to, value });
+      showToast('Sent! Tx: ' + truncate(res.txHash, 8, 6));
+      state.view = 'wallet';
+      render();
+      // Refresh balance after a short delay
+      setTimeout(async () => {
+        try { await refreshBalance(); render(); } catch { /* ignore */ }
+      }, 3000);
+    } catch (err) {
+      state.error = (err as Error).message;
+      render();
+    }
+  });
+
+  on('btn-copy-addr', 'click', () => copyText(state.pqAddress, 'Address copied'));
+  on('btn-copy-full', 'click', () => copyText(state.pqAddress, 'Address copied'));
+  on('btn-copy-hex', 'click', () => copyText(state.hexAddress, 'Hex address copied'));
+
+  on('btn-export-ks', 'click', async () => {
+    try {
+      const res = await send<{ keystoreJson: string }>('EXPORT_KEYSTORE');
+      downloadJson(res.keystoreJson, 'shella-keystore.json');
+      showToast('Keystore exported');
+    } catch (err) {
+      showToast((err as Error).message, true);
+    }
+  });
+
+  on('btn-reset', 'click', async () => {
+    if (confirm('Reset wallet? This deletes all local data. Make sure you have exported your keystore!')) {
+      await send('RESET_WALLET');
+      Object.assign(state, {
+        view: 'welcome',
+        pqAddress: '',
+        hexAddress: '',
+        balance: '0',
+        balanceFormatted: '0.000000',
+        txHistory: [],
+        error: '',
+      });
+      render();
+    }
+  });
+
+  // Network switch
+  const netSelect = document.getElementById('network-select') as HTMLSelectElement | null;
+  if (netSelect) {
+    netSelect.addEventListener('change', async () => {
+      const val = netSelect.value;
+      if (val === 'custom') {
+        const sec = document.getElementById('custom-rpc-section');
+        if (sec) sec.style.display = 'block';
+        return;
+      }
+      const networks: Record<string, { name: string; chainId: number; rpcUrl: string }> = {
+        devnet: { name: 'Shell Devnet', chainId: 424242, rpcUrl: 'http://127.0.0.1:8545' },
+        testnet: { name: 'Shell Testnet', chainId: 12345, rpcUrl: 'https://rpc.testnet.shell.network' },
+        mainnet: { name: 'Shell Mainnet', chainId: 100000, rpcUrl: 'https://rpc.mainnet.shell.network' },
+      };
+      const net = networks[val];
+      if (net) {
+        await send('SET_NETWORK', { network: net });
+        state.network = net;
+        showToast('Network switched to ' + net.name);
+      }
+    });
+  }
+
+  on('btn-save-custom', 'click', async () => {
+    const chainId = parseInt((document.getElementById('custom-chain-id') as HTMLInputElement)?.value);
+    const rpcUrl = (document.getElementById('custom-rpc-url') as HTMLInputElement)?.value?.trim();
+    const name = (document.getElementById('custom-net-name') as HTMLInputElement)?.value?.trim() || 'Custom';
+    if (!chainId || !rpcUrl) {
+      showToast('Fill in Chain ID and RPC URL', true);
+      return;
+    }
+    const net = { name, chainId, rpcUrl };
+    await send('SET_NETWORK', { network: net });
+    state.network = net;
+    showToast('Custom RPC saved');
+  });
+}
+
+// ────────── Helpers ──────────
+
+async function refreshBalance(): Promise<void> {
+  if (!state.pqAddress) return;
+  const res = await send<{ balance: string; formatted: string }>('GET_BALANCE', {
+    address: state.hexAddress || state.pqAddress,
+  });
+  state.balance = res.balance;
+  state.balanceFormatted = res.formatted;
+}
+
+async function refreshWalletData(): Promise<void> {
+  const [netRes, accountsRes] = await Promise.all([
+    send<{ network: { name: string; chainId: number; rpcUrl: string } }>('GET_NETWORK'),
+    send<{ accounts: Array<{ pqAddress: string; hexAddress: string }> }>('GET_ACCOUNTS'),
+  ]);
+  state.network = netRes.network;
+  if (accountsRes.accounts.length > 0) {
+    state.pqAddress = accountsRes.accounts[0].pqAddress;
+    state.hexAddress = accountsRes.accounts[0].hexAddress;
+  }
+  // Try to refresh balance (non-fatal)
+  try { await refreshBalance(); } catch { /* ignore */ }
+}
+
+function copyText(text: string, msg: string): void {
+  navigator.clipboard.writeText(text).then(() => showToast(msg)).catch(() => {
+    // Fallback
+    const el = document.createElement('textarea');
+    el.value = text;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand('copy');
+    document.body.removeChild(el);
+    showToast(msg);
+  });
+}
+
+function downloadJson(json: string, filename: string): void {
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ────────── Boot ──────────
+
+async function boot(): Promise<void> {
+  const [lockedRes, accountsRes, netRes] = await Promise.all([
+    send<{ locked: boolean }>('CHECK_LOCKED'),
+    send<{ accounts: Array<{ pqAddress: string; hexAddress: string }> }>('GET_ACCOUNTS'),
+    send<{ network: { name: string; chainId: number; rpcUrl: string } }>('GET_NETWORK'),
+  ]);
+
+  state.network = netRes.network;
+
+  if (accountsRes.accounts.length === 0) {
+    state.view = 'welcome';
+  } else if (lockedRes.locked) {
+    state.pqAddress = accountsRes.accounts[0].pqAddress;
+    state.hexAddress = accountsRes.accounts[0].hexAddress;
+    state.view = 'locked';
+  } else {
+    state.pqAddress = accountsRes.accounts[0].pqAddress;
+    state.hexAddress = accountsRes.accounts[0].hexAddress;
+    state.view = 'wallet';
+    // Refresh balance in background
+    refreshBalance().then(() => render()).catch(() => { /* ignore */ });
+  }
+
+  render();
+}
+
+boot().catch((err) => {
+  state.view = 'locked';
+  state.error = (err as Error).message;
+  render();
+});
+
