@@ -615,8 +615,8 @@ function attachHandlers(): void {
       render();
       return;
     }
-    if (data !== '0x' && !/^0x[0-9a-fA-F]*$/.test(data)) {
-      state.error = 'Calldata must be 0x-prefixed hex';
+    if (data !== '0x' && (!/^0x[0-9a-fA-F]*$/.test(data) || data.length % 2 !== 0)) {
+      state.error = 'Calldata must be an even-length 0x-prefixed hex string';
       render();
       return;
     }

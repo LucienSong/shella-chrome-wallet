@@ -197,6 +197,7 @@ async function createWallet(password: string): Promise<{ pqAddress: string; hexA
     signatureType: 'MlDsa65',
   });
   await scheduleAutoLock();
+  sk.fill(0);
 
   return { pqAddress, hexAddress };
 }
@@ -315,7 +316,8 @@ async function sendTransaction(params: SendTransactionParams): Promise<{ txHash:
   const valueBigInt = parseEtherValue(params.value);
   const data = normalizeData(params.data);
 
-  const nonce = await provider.client.getTransactionCount({ address: from });
+  const onChainNonce = await provider.client.getTransactionCount({ address: from });
+  const nonce = await allocateNextNonce(from, onChainNonce);
   const tx = data === '0x'
     ? buildTransferTransaction({
         chainId: network.chainId,
@@ -422,6 +424,20 @@ async function pollPendingTransactions(): Promise<void> {
     await setTxQueue(next);
   }
   await scheduleTxPolling();
+}
+
+async function allocateNextNonce(from: `0x${string}`, onChainNonce: number): Promise<number> {
+  const txQueue = await getTxQueue();
+  const pendingNonces = txQueue
+    .filter((tx) => tx.status === 'pending' && tx.from.toLowerCase() === from.toLowerCase())
+    .map((tx) => tx.nonce)
+    .filter((nonce): nonce is number => nonce != null)
+    .sort((a, b) => b - a);
+
+  if (pendingNonces.length === 0) {
+    return onChainNonce;
+  }
+  return Math.max(onChainNonce, pendingNonces[0] + 1);
 }
 
 function buildProvider(network: Network) {

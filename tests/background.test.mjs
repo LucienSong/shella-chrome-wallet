@@ -41,6 +41,7 @@ const listeners = {
   onMessage: [],
   onAlarm: [],
 };
+let txCounter = 0;
 
 globalThis.chrome = {
   runtime: {
@@ -65,9 +66,13 @@ globalThis.fetch = async (url, init) => {
     eth_getBalance: '0xde0b6b3a7640000',
     eth_getTransactionCount: '0x0',
     eth_chainId: '0x67932',
-    shell_sendTransaction: '0x' + 'ab'.repeat(32),
     shell_getTransactionsByAddress: { transactions: [], total: 0 },
   };
+
+  if (body.method === 'shell_sendTransaction') {
+    txCounter += 1;
+    resultByMethod.shell_sendTransaction = `0x${txCounter.toString(16).padStart(64, '0')}`;
+  }
 
   if (!(body.method in resultByMethod)) {
     throw new Error(`Unexpected RPC method: ${body.method} (${url})`);
@@ -86,6 +91,7 @@ globalThis.fetch = async (url, init) => {
 const { handleMessage } = await import('../dist/background.js');
 
 test('create wallet -> snapshot -> export -> reset -> import', async () => {
+  txCounter = 0;
   await handleMessage({ type: 'RESET_WALLET' });
 
   const created = await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
@@ -116,6 +122,7 @@ test('create wallet -> snapshot -> export -> reset -> import', async () => {
 });
 
 test('send transaction records local pending activity', async () => {
+  txCounter = 0;
   await handleMessage({ type: 'RESET_WALLET' });
   const created = await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
 
@@ -125,8 +132,15 @@ test('send transaction records local pending activity', async () => {
     value: '1.25',
     data: '0x',
   });
+  const sentSecond = await handleMessage({
+    type: 'SEND_TX',
+    to: '0x2222222222222222222222222222222222222222',
+    value: '0.5',
+    data: '0x',
+  });
 
   assert.match(sent.txHash, /^0x[0-9a-f]+$/);
+  assert.match(sentSecond.txHash, /^0x[0-9a-f]+$/);
 
   const history = await handleMessage({
     type: 'GET_TX_HISTORY',
@@ -134,8 +148,9 @@ test('send transaction records local pending activity', async () => {
     page: 0,
   });
 
-  assert.equal(history.txs.length, 1);
+  assert.equal(history.txs.length, 2);
   assert.equal(history.txs[0].status, 'pending');
-  assert.equal(history.txs[0].txHash, sent.txHash);
   assert.equal(history.txs[0].source, 'local');
+  assert.equal(history.txs[1].source, 'local');
+  assert.deepEqual(history.txs.map((tx) => tx.nonce).sort((a, b) => a - b), [0, 1]);
 });
