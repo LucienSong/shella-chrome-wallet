@@ -97,6 +97,30 @@ function truncate(addr: string, start = 10, end = 8): string {
   return addr.slice(0, start) + '…' + addr.slice(-end);
 }
 
+function isRpcUnavailable(): boolean {
+  return state.detectedChainId == null;
+}
+
+function isChainMismatch(): boolean {
+  return state.detectedChainId != null && state.detectedChainId !== state.network.chainId;
+}
+
+function getNetworkWarning(): string {
+  if (isRpcUnavailable()) {
+    return `RPC unavailable for ${state.network.name}. Check the RPC URL or node status.`;
+  }
+  if (isChainMismatch()) {
+    return `Chain mismatch: wallet expects ${state.network.chainId}, RPC returned ${state.detectedChainId}.`;
+  }
+  return '';
+}
+
+function getLatestFailedTx(): WalletTxRecord | null {
+  const failed = state.txQueue.filter((tx) => tx.status === 'failed');
+  if (failed.length === 0) return null;
+  return [...failed].sort((left, right) => right.updatedAt - left.updatedAt)[0] ?? null;
+}
+
 function render(): void {
   const views: Record<View, () => string> = {
     loading: renderLoading,
@@ -234,6 +258,8 @@ function renderLocked(): string {
 
 function renderWallet(): string {
   const pendingTxs = state.txQueue.filter((tx) => tx.status === 'pending').slice(0, 3);
+  const networkWarning = getNetworkWarning();
+  const failedTx = getLatestFailedTx();
   const pendingHtml = pendingTxs.length > 0
     ? `
       <div class="pending-card">
@@ -244,6 +270,18 @@ function renderWallet(): string {
             <span>${formatDisplayValue(tx.value)} SHELL</span>
           </div>
         `).join('')}
+      </div>
+    `
+    : '';
+  const failedHtml = failedTx
+    ? `
+      <div class="status-card status-card-error">
+        <div class="status-card-title">Latest failed transaction</div>
+        <div class="status-card-row">
+          <span class="monospace">${truncate(failedTx.txHash, 8, 6)}</span>
+          <span>${formatDisplayValue(failedTx.value)} SHELL</span>
+        </div>
+        <div class="status-card-detail">${failedTx.error ?? 'Transaction failed on-chain.'}</div>
       </div>
     `
     : '';
@@ -267,6 +305,7 @@ function renderWallet(): string {
         <span>${state.detectedChainId == null ? 'RPC unavailable' : `RPC chain: ${state.detectedChainId}`}</span>
         <span>${state.nonce == null ? 'Nonce unavailable' : `Nonce: ${state.nonce}`}</span>
       </div>
+      ${networkWarning ? `<div class="status-card status-card-warning">${networkWarning}</div>` : ''}
       <div class="action-row">
         <button class="btn-action" id="btn-send">
           <span>↑</span>Send
@@ -278,16 +317,20 @@ function renderWallet(): string {
           <span>☰</span>History
         </button>
       </div>
+      ${failedHtml}
       ${pendingHtml}
     </div>
   `;
 }
 
 function renderSend(): string {
+  const networkWarning = getNetworkWarning();
+  const sendDisabled = networkWarning !== '';
   return `
     <div class="view-form">
       <button class="btn-back" id="btn-back">← Back</button>
       <h2>Send SHELL</h2>
+      ${networkWarning ? `<div class="status-card status-card-warning">${networkWarning}</div>` : ''}
       <label>To Address (pq1… or 0x…)
         <input type="text" id="send-to" placeholder="pq1…" value="${state.sendTo}" />
       </label>
@@ -311,7 +354,9 @@ function renderSend(): string {
         <span class="fee-amount">${state.nonce == null ? 'unknown' : state.nonce}</span>
       </div>
       ${state.error ? `<div class="error">${state.error}</div>` : ''}
-      <button id="btn-send-confirm" class="btn-primary">Send</button>
+      <button id="btn-send-confirm" class="btn-primary" ${sendDisabled ? 'disabled' : ''}>
+        ${sendDisabled ? 'Fix network before sending' : 'Send'}
+      </button>
     </div>
   `;
 }
@@ -598,6 +643,11 @@ function attachHandlers(): void {
   });
 
   on('btn-send-confirm', 'click', async () => {
+    if (getNetworkWarning()) {
+      state.error = getNetworkWarning();
+      render();
+      return;
+    }
     const to = (document.getElementById('send-to') as HTMLInputElement)?.value?.trim();
     const value = (document.getElementById('send-value') as HTMLInputElement)?.value?.trim();
     const data = (document.getElementById('send-data') as HTMLInputElement)?.value?.trim() || '0x';
@@ -702,10 +752,15 @@ function attachHandlers(): void {
       };
       const net = networks[val];
       if (net) {
-        await send('SET_NETWORK', { network: net });
-        state.network = net;
-        await refreshWalletData();
-        showToast('Network switched to ' + net.name);
+        try {
+          await send('SET_NETWORK', { network: net });
+          state.network = net;
+          await refreshWalletData();
+          showToast('Network switched to ' + net.name);
+          render();
+        } catch (err) {
+          showToast((err as Error).message, true);
+        }
       }
     });
   }
@@ -719,10 +774,15 @@ function attachHandlers(): void {
       return;
     }
     const net = { name, chainId, rpcUrl };
-    await send('SET_NETWORK', { network: net });
-    state.network = net;
-    await refreshWalletData();
-    showToast('Custom RPC saved');
+    try {
+      await send('SET_NETWORK', { network: net });
+      state.network = net;
+      await refreshWalletData();
+      showToast('Custom RPC saved');
+      render();
+    } catch (err) {
+      showToast((err as Error).message, true);
+    }
   });
 
   on('btn-save-auto-lock', 'click', async () => {
@@ -762,6 +822,9 @@ async function refreshWalletData(): Promise<void> {
   if (snapshot.balance) {
     state.balance = snapshot.balance.raw;
     state.balanceFormatted = snapshot.balance.formatted;
+  } else {
+    state.balance = '0';
+    state.balanceFormatted = '0.000000';
   }
 }
 
@@ -821,6 +884,9 @@ async function boot(): Promise<void> {
     if (snapshot.balance) {
       state.balance = snapshot.balance.raw;
       state.balanceFormatted = snapshot.balance.formatted;
+    } else {
+      state.balance = '0';
+      state.balanceFormatted = '0.000000';
     }
     state.view = 'wallet';
   }

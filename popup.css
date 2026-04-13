@@ -60,6 +60,13 @@ body {
 }
 .btn-primary  { background: #1a6ef5; color: #fff; }
 .btn-primary:hover  { background: #155dd4; }
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-danger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
 .btn-secondary { background: #1e1e1e; color: #ccc; border: 1px solid #333; }
 .btn-secondary:hover { background: #2a2a2a; }
 .btn-danger   { background: #2a0f0f; color: #e74c3c; border: 1px solid #5a1a1a; }
@@ -273,6 +280,47 @@ input:focus, .select-input:focus { border-color: #1a6ef5; }
   background: #141414;
   border-radius: 10px;
   padding: 10px 12px;
+}
+
+.status-card {
+  margin-bottom: 12px;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.status-card-warning {
+  background: #1a1a0f;
+  border: 1px solid #4a3a00;
+  color: #e7c55a;
+}
+
+.status-card-error {
+  background: #2a0f0f;
+  border: 1px solid #5a1a1a;
+  color: #f0c1bb;
+}
+
+.status-card-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.status-card-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.status-card-detail {
+  margin-top: 6px;
+  color: inherit;
+  opacity: 0.92;
 }
 
 .pending-title {
