@@ -79,7 +79,9 @@ async function scheduleAutoLock(): Promise<void> {
   const minutes = await getAutoLockMinutes();
   if (minutes > 0) {
     chrome.alarms.create(AUTO_LOCK_ALARM, { delayInMinutes: minutes });
+    return;
   }
+  chrome.alarms.clear(AUTO_LOCK_ALARM);
 }
 
 async function scheduleTxPolling(): Promise<void> {

@@ -235,6 +235,17 @@ test('auto-lock can be configured and is triggered by alarm', async () => {
   assert.equal(clearedAlarms.includes('shella-auto-lock'), true);
 });
 
+test('disabling auto-lock clears any existing alarm', async () => {
+  txCounter = 0;
+  resetAlarmState();
+  await handleMessage({ type: 'RESET_WALLET' });
+  await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
+  await handleMessage({ type: 'SET_AUTO_LOCK', minutes: 5 });
+  await handleMessage({ type: 'SET_AUTO_LOCK', minutes: 0 });
+
+  assert.equal(clearedAlarms.includes('shella-auto-lock'), true);
+});
+
 test('manifest permissions remain minimal', async () => {
   const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
