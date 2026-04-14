@@ -40,6 +40,16 @@ try {
       entryPoints: [join(root, 'src/background.ts')],
       outfile: join(dist, 'background.js'),
     }),
+    esbuild.build({
+      ...sharedConfig,
+      entryPoints: [join(root, 'src/crypto.ts')],
+      outfile: join(dist, 'crypto.js'),
+    }),
+    esbuild.build({
+      ...sharedConfig,
+      entryPoints: [join(root, 'src/store.ts')],
+      outfile: join(dist, 'store.js'),
+    }),
   ]);
   console.log('✓ Build complete → dist/');
 } catch (err) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import test from 'node:test';
+import { describe, test } from 'node:test';
 
 function createStorageArea() {
   const store = new Map();
@@ -107,6 +107,8 @@ function dispatchRuntimeMessage(message) {
     listeners.onMessage[0](message, undefined, resolve);
   });
 }
+
+describe('background e2e', () => {
 
 test('create wallet -> snapshot -> export -> reset -> import', async () => {
   txCounter = 0;
@@ -251,3 +253,5 @@ test('manifest permissions remain minimal', async () => {
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
   assert.deepEqual(manifest.host_permissions, []);
 });
+
+}); // describe('background e2e')
