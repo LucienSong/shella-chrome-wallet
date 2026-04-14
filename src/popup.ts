@@ -14,6 +14,8 @@ type View =
   | 'import-file'
   | 'import-password'
   | 'locked'
+  | 'unlocking'
+  | 'sending'
   | 'wallet'
   | 'send'
   | 'receive'
@@ -92,7 +94,7 @@ function showToast(msg: string, isError = false): void {
   }, 3000);
 }
 
-function truncate(addr: string, start = 10, end = 8): string {
+export function truncate(addr: string, start = 10, end = 8): string {
   if (!addr || addr.length <= start + end + 3) return addr;
   return addr.slice(0, start) + '…' + addr.slice(-end);
 }
@@ -131,6 +133,8 @@ function render(): void {
     'import-file': renderImportFile,
     'import-password': renderImportPassword,
     locked: renderLocked,
+    unlocking: renderUnlocking,
+    sending: renderSending,
     wallet: renderWallet,
     send: renderSend,
     receive: renderReceive,
@@ -184,6 +188,26 @@ function renderGenerating(): string {
       <div class="spinner"></div>
       <h2>Generating Key Pair</h2>
       <p class="hint">Using ML-DSA-65 post-quantum algorithm…</p>
+    </div>
+  `;
+}
+
+function renderUnlocking(): string {
+  return `
+    <div class="center">
+      <div class="spinner"></div>
+      <h2>Unlocking…</h2>
+      <p class="hint">Decrypting your keystore, please wait.</p>
+    </div>
+  `;
+}
+
+function renderSending(): string {
+  return `
+    <div class="center">
+      <div class="spinner"></div>
+      <h2>Sending Transaction…</h2>
+      <p class="hint">Signing and broadcasting to ${state.network.name}…</p>
     </div>
   `;
 }
@@ -288,7 +312,12 @@ function renderWallet(): string {
   return `
     <div class="wallet-view">
       <div class="wallet-header">
-        <div class="network-badge" id="btn-settings">${state.network.name}</div>
+        <select id="quick-net-select" class="quick-net-select" title="Switch network">
+          <option value="devnet" ${state.network.name === 'Shell Devnet' ? 'selected' : ''}>⬡ Devnet</option>
+          <option value="testnet" ${state.network.name === 'Shell Testnet' ? 'selected' : ''}>⬡ Testnet</option>
+          <option value="mainnet" ${state.network.name === 'Shell Mainnet' ? 'selected' : ''}>⬡ Mainnet</option>
+        </select>
+        <button class="btn-icon" id="btn-settings" title="Settings">⚙</button>
         <button class="btn-icon" id="btn-lock" title="Lock wallet">🔒</button>
       </div>
       <div class="address-box">
@@ -576,6 +605,8 @@ function attachHandlers(): void {
     const pwd = (document.getElementById('unlock-pwd') as HTMLInputElement)?.value;
     if (!pwd) return;
     state.error = '';
+    state.view = 'unlocking';
+    render();
     try {
       await send('UNLOCK_WALLET', { password: pwd });
       await refreshWalletData();
@@ -583,6 +614,7 @@ function attachHandlers(): void {
       render();
     } catch (err) {
       state.error = (err as Error).message;
+      state.view = 'locked';
       render();
     }
   });
@@ -602,6 +634,31 @@ function attachHandlers(): void {
     state.view = 'settings';
     render();
   });
+
+  // Quick network switcher in wallet header
+  const quickNetSelect = document.getElementById('quick-net-select') as HTMLSelectElement | null;
+  if (quickNetSelect) {
+    quickNetSelect.addEventListener('change', async () => {
+      const val = quickNetSelect.value;
+      const quickNetworks: Record<string, { name: string; chainId: number; rpcUrl: string }> = {
+        devnet: { name: 'Shell Devnet', chainId: 424242, rpcUrl: 'http://127.0.0.1:8545' },
+        testnet: { name: 'Shell Testnet', chainId: 12345, rpcUrl: 'https://rpc.testnet.shell.network' },
+        mainnet: { name: 'Shell Mainnet', chainId: 100000, rpcUrl: 'https://rpc.mainnet.shell.network' },
+      };
+      const net = quickNetworks[val];
+      if (net) {
+        try {
+          await send('SET_NETWORK', { network: net });
+          state.network = net;
+          await refreshWalletData();
+          showToast('Switched to ' + net.name);
+          render();
+        } catch (err) {
+          showToast((err as Error).message, true);
+        }
+      }
+    });
+  }
 
   on('btn-send', 'click', () => {
     state.sendTo = '';
@@ -683,6 +740,8 @@ function attachHandlers(): void {
     state.sendGasLimit = gasLimit;
     state.sendMaxFeePerGas = maxFeePerGas;
     state.sendMaxPriorityFeePerGas = maxPriorityFeePerGas;
+    state.view = 'sending';
+    render();
     try {
       const res = await send<{ txHash: string }>('SEND_TX', {
         to,
@@ -698,6 +757,7 @@ function attachHandlers(): void {
       render();
     } catch (err) {
       state.error = (err as Error).message;
+      state.view = 'send';
       render();
     }
   });
@@ -851,13 +911,13 @@ function downloadJson(json: string, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
-function parseOptionalNumber(value: string): number | undefined {
+export function parseOptionalNumber(value: string): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function formatDisplayValue(value: string): string {
+export function formatDisplayValue(value: string): string {
   const normalized = value.startsWith('0x') ? BigInt(value) : BigInt(value);
   return (Number(normalized) / 1e18).toFixed(6);
 }
