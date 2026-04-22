@@ -144,11 +144,30 @@ describe('store', () => {
   });
 
   test('connected sites can be added and removed', async () => {
-    await addConnectedSite('https://app.shell.network');
-    await addConnectedSite('https://dapp.example.com');
-    await addConnectedSite('https://app.shell.network'); // duplicate
+    await addConnectedSite({
+      origin: 'https://app.shell.network',
+      accounts: ['0x123'],
+      chainId: 424242,
+      grantedAt: 1,
+      lastUsedAt: 2,
+    });
+    await addConnectedSite({
+      origin: 'https://dapp.example.com',
+      accounts: ['0x456'],
+      chainId: 12345,
+      grantedAt: 3,
+      lastUsedAt: 4,
+    });
+    await addConnectedSite({
+      origin: 'https://app.shell.network',
+      accounts: ['0x789'],
+      chainId: 424242,
+      grantedAt: 1,
+      lastUsedAt: 5,
+    }); // replace duplicate by origin
     const sites = await getConnectedSites();
     assert.equal(sites.length, 2);
+    assert.equal(sites.find((site) => site.origin === 'https://app.shell.network').accounts[0], '0x789');
 
     await removeConnectedSite('https://dapp.example.com');
     assert.equal((await getConnectedSites()).length, 1);
@@ -161,5 +180,28 @@ describe('store', () => {
     const state = await getWalletState();
     assert.deepEqual(state.accounts, []);
     assert.equal(state.network.name, 'Shell Devnet');
+  });
+
+  test('initStore migrates legacy connectedSites strings into stable objects', async () => {
+    localArea._store.clear();
+    sessionArea._store.clear();
+    await localArea.set({
+      network: { name: 'Shell Devnet', chainId: 424242, rpcUrl: 'http://127.0.0.1:8545' },
+      accounts: [],
+      autoLockMinutes: 15,
+      connectedSites: ['https://legacy.example'],
+      txQueue: [],
+    });
+
+    await initStore();
+    const sites = await getConnectedSites();
+    assert.equal(sites.length, 1);
+    assert.equal(sites[0].origin, 'https://legacy.example');
+    assert.equal(Array.isArray(sites[0].accounts), true);
+    assert.equal(typeof sites[0].grantedAt, 'number');
+
+    const stored = await localArea.get('connectedSites');
+    assert.equal(typeof stored.connectedSites[0], 'object');
+    assert.equal(stored.connectedSites[0].origin, 'https://legacy.example');
   });
 });

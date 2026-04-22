@@ -2,8 +2,14 @@
 
 ## [0.17.0] — 2026-04-21
 
+### Added
+- GitHub Actions CI matrix on Node 20/22 with release metadata verification and production bundle-size guard.
+- Deterministic release packaging (`npm run release:bundle`) that emits a zip and SHA-256 checksum in `dist/release/`.
+
 ### Changed
 - Bump version to align with shell-chain v0.17.0
+- Align `manifest.json` version with `package.json` for release/store consistency.
+- Clarify in docs that the large development `background.js` size is caused by inline sourcemaps; production bundles are size-checked separately.
 
 ## [0.2.0] — 2026-04-14
 

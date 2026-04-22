@@ -7,8 +7,11 @@
   "scripts": {
     "build": "node scripts/bundle.js",
     "build:prod": "node scripts/bundle.js --prod",
+    "check:bundle-size": "node scripts/check-bundle-size.js",
+    "check:release-metadata": "node scripts/check-release-metadata.js",
+    "release:bundle": "node scripts/package-release.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test tests/**/*.test.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist"
   },

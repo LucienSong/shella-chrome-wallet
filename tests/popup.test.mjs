@@ -31,12 +31,18 @@ domElements.set('toast', toastEl);
 
 globalThis.document = {
   getElementById: (id) => domElements.get(id) ?? null,
+  querySelectorAll: () => [],
   createElement: () => ({
     style: {}, href: '', download: '', tagName: 'a',
     click() {}, select() {}, value: '',
     addEventListener() {},
   }),
   body: { appendChild() {}, removeChild() {} },
+};
+
+globalThis.window = {
+  location: { search: '' },
+  close() {},
 };
 
 Object.defineProperty(globalThis, 'navigator', {

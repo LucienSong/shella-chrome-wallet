@@ -3,7 +3,13 @@
  * Multi-view SPA rendered into #app.
  */
 
-import type { Network, WalletSnapshot, WalletTxRecord } from './types.js';
+import type {
+  ApprovalRequest,
+  ConnectedSitePermission,
+  Network,
+  WalletSnapshot,
+  WalletTxRecord,
+} from './types.js';
 
 type View =
   | 'loading'
@@ -20,7 +26,8 @@ type View =
   | 'send'
   | 'receive'
   | 'history'
-  | 'settings';
+  | 'settings'
+  | 'approval-request';
 
 interface AppState {
   view: View;
@@ -32,6 +39,7 @@ interface AppState {
   detectedChainId: number | null;
   nonce: number | null;
   autoLockMinutes: number;
+  connectedSites: ConnectedSitePermission[];
   txHistory: WalletTxRecord[];
   txQueue: WalletTxRecord[];
   error: string;
@@ -44,6 +52,7 @@ interface AppState {
   sendGasLimit: string;
   sendMaxFeePerGas: string;
   sendMaxPriorityFeePerGas: string;
+  approvalRequest: ApprovalRequest | null;
 }
 
 const state: AppState = {
@@ -56,6 +65,7 @@ const state: AppState = {
   detectedChainId: null,
   nonce: null,
   autoLockMinutes: 15,
+  connectedSites: [],
   txHistory: [],
   txQueue: [],
   error: '',
@@ -67,6 +77,7 @@ const state: AppState = {
   sendGasLimit: '',
   sendMaxFeePerGas: '',
   sendMaxPriorityFeePerGas: '',
+  approvalRequest: null,
 };
 
 function send<T = unknown>(type: string, data: Record<string, unknown> = {}): Promise<T> {
@@ -140,6 +151,7 @@ function render(): void {
     receive: renderReceive,
     history: renderHistory,
     settings: renderSettings,
+    'approval-request': renderApprovalRequest,
   };
   app().innerHTML = `
     <div id="toast" class="toast" style="display:none"></div>
@@ -442,6 +454,20 @@ function renderHistory(): string {
 }
 
 function renderSettings(): string {
+  const connectedSitesHtml = state.connectedSites.length > 0
+    ? state.connectedSites.map((site) => `
+        <div class="site-item">
+          <div class="site-item-main">
+            <div class="site-origin">${site.origin}</div>
+            <div class="site-meta">
+              <span>${site.accounts.length > 0 ? truncate(site.accounts[0], 8, 6) : 'No accounts'}</span>
+              <span>Chain ${site.chainId}</span>
+            </div>
+          </div>
+          <button class="btn-secondary btn-site-revoke" data-origin="${site.origin}">Revoke</button>
+        </div>
+      `).join('')
+    : '<div class="empty-state compact-empty">No connected dApps yet</div>';
   return `
     <div class="view-form">
       <button class="btn-back" id="btn-back">← Back</button>
@@ -474,6 +500,43 @@ function renderSettings(): string {
       <button id="btn-save-auto-lock" class="btn-secondary">Save Auto-lock</button>
       <button id="btn-export-ks" class="btn-secondary">Export Keystore</button>
       <button id="btn-reset" class="btn-danger">Reset Wallet</button>
+
+      <div class="section-title" style="margin-top:16px">Connected dApps</div>
+      <div class="site-list">${connectedSitesHtml}</div>
+    </div>
+  `;
+}
+
+function renderApprovalRequest(): string {
+  const request = state.approvalRequest;
+  if (!request) {
+    return `
+      <div class="center">
+        <h2>Approval not found</h2>
+        <p class="hint">This approval request may have expired.</p>
+      </div>
+    `;
+  }
+
+  const details = Object.entries(request.payload)
+    .map(([key, value]) => `
+      <div class="approval-row">
+        <span class="approval-key">${key}</span>
+        <span class="approval-value monospace">${String(value)}</span>
+      </div>
+    `)
+    .join('');
+
+  return `
+    <div class="view-form">
+      <div class="logo">🛡️</div>
+      <h2>Approve Request</h2>
+      <p class="hint">${request.origin}</p>
+      <div class="status-card status-card-warning">This site is requesting: <strong>${request.kind}</strong></div>
+      <div class="approval-card">${details}</div>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-approval-approve" class="btn-primary">Approve</button>
+      <button id="btn-approval-reject" class="btn-secondary">Reject</button>
     </div>
   `;
 }
@@ -855,6 +918,31 @@ function attachHandlers(): void {
     state.autoLockMinutes = minutes;
     showToast('Auto-lock updated');
   });
+
+  on('btn-approval-approve', 'click', async () => {
+    if (!state.approvalRequest) return;
+    await send('RESOLVE_APPROVAL', { requestId: state.approvalRequest.id, approved: true });
+    window.close();
+  });
+
+  on('btn-approval-reject', 'click', async () => {
+    if (!state.approvalRequest) return;
+    await send('RESOLVE_APPROVAL', { requestId: state.approvalRequest.id, approved: false });
+    window.close();
+  });
+
+  if (typeof document.querySelectorAll === 'function') {
+    document.querySelectorAll<HTMLButtonElement>('.btn-site-revoke').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const origin = button.dataset.origin;
+        if (!origin) return;
+        await send('REMOVE_CONNECTED_SITE', { origin });
+        state.connectedSites = state.connectedSites.filter((site) => site.origin !== origin);
+        render();
+        showToast('dApp permission revoked');
+      });
+    });
+  }
 }
 
 // ────────── Helpers ──────────
@@ -873,6 +961,7 @@ async function refreshWalletData(): Promise<void> {
   state.network = snapshot.wallet.network;
   state.txQueue = snapshot.wallet.txQueue;
   state.autoLockMinutes = snapshot.wallet.autoLockMinutes;
+  state.connectedSites = snapshot.wallet.connectedSites;
   state.detectedChainId = snapshot.detectedChainId;
   state.nonce = snapshot.nonce;
   if (snapshot.primaryAccount) {
@@ -925,10 +1014,19 @@ export function formatDisplayValue(value: string): string {
 // ────────── Boot ──────────
 
 async function boot(): Promise<void> {
+  const approvalId = new URLSearchParams(window.location.search).get('approvalId');
+  if (approvalId) {
+    state.approvalRequest = await send<ApprovalRequest>('GET_APPROVAL_REQUEST', { requestId: approvalId });
+    state.view = 'approval-request';
+    render();
+    return;
+  }
+
   const snapshot = await send<WalletSnapshot>('GET_WALLET_SNAPSHOT');
   state.network = snapshot.wallet.network;
   state.txQueue = snapshot.wallet.txQueue;
   state.autoLockMinutes = snapshot.wallet.autoLockMinutes;
+  state.connectedSites = snapshot.wallet.connectedSites;
   state.detectedChainId = snapshot.detectedChainId;
   state.nonce = snapshot.nonce;
 

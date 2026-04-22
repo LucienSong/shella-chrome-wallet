@@ -45,12 +45,14 @@ const listeners = {
 let txCounter = 0;
 const createdAlarms = [];
 const clearedAlarms = [];
+const createdWindows = [];
 
 globalThis.chrome = {
   runtime: {
     onInstalled: { addListener(fn) { listeners.onInstalled.push(fn); } },
     onStartup: { addListener(fn) { listeners.onStartup.push(fn); } },
     onMessage: { addListener(fn) { listeners.onMessage.push(fn); } },
+    getURL(path) { return `chrome-extension://test/${path}`; },
   },
   alarms: {
     create(name, options) {
@@ -60,6 +62,12 @@ globalThis.chrome = {
       clearedAlarms.push(name);
     },
     onAlarm: { addListener(fn) { listeners.onAlarm.push(fn); } },
+  },
+  windows: {
+    create(options, callback) {
+      createdWindows.push(options);
+      callback?.({ id: createdWindows.length });
+    },
   },
   storage: {
     local: createStorageArea(),
@@ -73,6 +81,8 @@ globalThis.fetch = async (url, init) => {
     eth_getBalance: '0xde0b6b3a7640000',
     eth_getTransactionCount: '0x0',
     eth_chainId: '0x67932',
+    eth_blockNumber: '0x2a',
+    eth_call: '0x',
     shell_getTransactionsByAddress: { transactions: [], total: 0 },
   };
 
@@ -100,12 +110,27 @@ const { handleMessage } = await import('../dist/background.js');
 function resetAlarmState() {
   createdAlarms.length = 0;
   clearedAlarms.length = 0;
+  createdWindows.length = 0;
 }
 
 function dispatchRuntimeMessage(message) {
   return new Promise((resolve) => {
     listeners.onMessage[0](message, undefined, resolve);
   });
+}
+
+async function resolveLatestApproval(approved = true, previousCount = 0) {
+  for (let i = 0; i < 10 && createdWindows.length <= previousCount; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.ok(createdWindows.length > previousCount, 'expected an approval popup to be created');
+  const latest = createdWindows[createdWindows.length - 1];
+  const url = new URL(latest.url);
+  const requestId = url.searchParams.get('approvalId');
+  assert.ok(requestId, 'approval popup URL should contain requestId');
+  const request = await handleMessage({ type: 'GET_APPROVAL_REQUEST', requestId });
+  assert.equal(typeof request.kind, 'string');
+  await handleMessage({ type: 'RESOLVE_APPROVAL', requestId, approved });
 }
 
 describe('background e2e', () => {
@@ -251,7 +276,144 @@ test('disabling auto-lock clears any existing alarm', async () => {
 test('manifest permissions remain minimal', async () => {
   const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   assert.deepEqual(manifest.permissions, ['storage', 'alarms']);
-  assert.deepEqual(manifest.host_permissions, []);
+  assert.deepEqual(manifest.host_permissions, ['http://*/*', 'https://*/*']);
+});
+
+test('dapp provider grants site access and proxies read methods', async () => {
+  txCounter = 0;
+  resetAlarmState();
+  await handleMessage({ type: 'RESET_WALLET' });
+  const created = await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
+
+  const approvalsBeforeConnect = createdWindows.length;
+  const accountsPromise = handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://app.shell.org',
+    method: 'eth_requestAccounts',
+    params: [],
+  });
+  await resolveLatestApproval(true, approvalsBeforeConnect);
+  const accounts = await accountsPromise;
+  assert.deepEqual(accounts, [created.hexAddress]);
+
+  const connected = await handleMessage({ type: 'GET_CONNECTED_SITES' });
+  assert.equal(connected.sites.length, 1);
+  assert.equal(connected.sites[0].origin, 'https://app.shell.org');
+  assert.deepEqual(connected.sites[0].accounts, [created.hexAddress]);
+
+  const chainId = await handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://app.shell.org',
+    method: 'eth_chainId',
+    params: [],
+  });
+  assert.equal(chainId, '0x67932');
+
+  const blockNumber = await handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://app.shell.org',
+    method: 'eth_blockNumber',
+    params: [],
+  });
+  assert.equal(blockNumber, '0x2a');
+
+  const pqAddress = await handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://app.shell.org',
+    method: 'shella_getPqAddress',
+    params: [],
+  });
+  assert.equal(pqAddress, created.pqAddress);
+
+  await handleMessage({ type: 'REMOVE_CONNECTED_SITE', origin: 'https://app.shell.org' });
+  const noAccounts = await handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://app.shell.org',
+    method: 'eth_accounts',
+    params: [],
+  });
+  assert.deepEqual(noAccounts, []);
+});
+
+test('dapp provider can send a transaction for a connected site', async () => {
+  txCounter = 0;
+  resetAlarmState();
+  await handleMessage({ type: 'RESET_WALLET' });
+  const created = await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
+
+  const approvalsBeforeConnect = createdWindows.length;
+  const connectPromise = handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://swap.example.com',
+    method: 'eth_requestAccounts',
+    params: [],
+  });
+  await resolveLatestApproval(true, approvalsBeforeConnect);
+  await connectPromise;
+
+  const approvalsBeforeSend = createdWindows.length;
+  const sentPromise = handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://swap.example.com',
+    method: 'eth_sendTransaction',
+    params: [{
+      from: created.hexAddress,
+      to: '0x3333333333333333333333333333333333333333',
+      value: '0xde0b6b3a7640000',
+      data: '0x',
+    }],
+  });
+  await resolveLatestApproval(true, approvalsBeforeSend);
+  const sent = await sentPromise;
+
+  assert.match(sent.txHash, /^0x[0-9a-f]+$/);
+});
+
+test('wallet_addEthereumChain requires an existing connection and approval', async () => {
+  txCounter = 0;
+  resetAlarmState();
+  await handleMessage({ type: 'RESET_WALLET' });
+  await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
+
+  const denied = await dispatchRuntimeMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://newchain.example',
+    method: 'wallet_addEthereumChain',
+    params: [{
+      chainId: '0x1234',
+      chainName: 'Example Chain',
+      rpcUrls: ['https://rpc.example'],
+    }],
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error, 'Site not connected: https://newchain.example');
+
+  const approvalsBeforeConnect = createdWindows.length;
+  const connectPromise = handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://newchain.example',
+    method: 'eth_requestAccounts',
+    params: [],
+  });
+  await resolveLatestApproval(true, approvalsBeforeConnect);
+  await connectPromise;
+
+  const approvalsBeforeAddChain = createdWindows.length;
+  const addChainPromise = handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://newchain.example',
+    method: 'wallet_addEthereumChain',
+    params: [{
+      chainId: '0x1234',
+      chainName: 'Example Chain',
+      rpcUrls: ['https://rpc.example'],
+    }],
+  });
+  await resolveLatestApproval(true, approvalsBeforeAddChain);
+  await addChainPromise;
+
+  const network = await handleMessage({ type: 'GET_NETWORK' });
+  assert.equal(network.network.chainId, 0x1234);
 });
 
 }); // describe('background e2e')

@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout shell-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: ShellDAO/shell-sdk
+          path: shell-sdk
+
+      - name: Link sibling shell-sdk
+        run: ln -s "$GITHUB_WORKSPACE/shell-sdk" "$GITHUB_WORKSPACE/../shell-sdk"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install shell-sdk dependencies
+        working-directory: shell-sdk
+        run: npm ci
+
+      - name: Build shell-sdk
+        working-directory: shell-sdk
+        run: npm run build
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify tag matches package version
+        id: meta
+        run: |
+          VERSION="$(node --input-type=module -e "import fs from 'node:fs'; console.log(JSON.parse(fs.readFileSync('package.json', 'utf8')).version)")"
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version v$VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Verify release metadata
+        run: npm run check:release-metadata
+
+      - name: Build release bundle
+        run: npm run release:bundle
+
+      - name: Enforce bundle size
+        run: npm run check:bundle-size
+
+      - name: Extract release notes
+        run: |
+          awk -v version="${{ steps.meta.outputs.version }}" '
+            $0 ~ "^## \\[" version "\\]" { capture=1; next }
+            capture && $0 ~ "^## \\[" { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+
+      - name: Publish GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/release/shella-wallet-v${{ steps.meta.outputs.version }}.zip" \
+            "dist/release/shella-wallet-v${{ steps.meta.outputs.version }}.zip.sha256" \
+            --title "Shella Wallet v${{ steps.meta.outputs.version }}" \
+            --notes-file release-notes.md

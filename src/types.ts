@@ -10,6 +10,14 @@ export interface StoredAccount {
   keystoreJson: string;
 }
 
+export interface ConnectedSitePermission {
+  origin: string;
+  accounts: `0x${string}`[];
+  chainId: number;
+  grantedAt: number;
+  lastUsedAt: number;
+}
+
 export type WalletTxStatus = 'pending' | 'confirmed' | 'failed';
 
 export interface WalletTxRecord {
@@ -31,7 +39,7 @@ export interface WalletState {
   accounts: StoredAccount[];
   network: Network;
   autoLockMinutes: number;
-  connectedSites: string[];
+  connectedSites: ConnectedSitePermission[];
   txQueue: WalletTxRecord[];
 }
 
@@ -72,4 +80,19 @@ export interface SendTransactionParams {
   gasLimit?: number;
   maxFeePerGas?: number;
   maxPriorityFeePerGas?: number;
+}
+
+export interface DappRequestMessage {
+  origin: string;
+  method: string;
+  params?: unknown[];
+  interactive?: boolean;
+}
+
+export interface ApprovalRequest {
+  id: string;
+  kind: 'connect' | 'add-chain' | 'switch-chain' | 'send-transaction';
+  origin: string;
+  createdAt: number;
+  payload: Record<string, unknown>;
 }

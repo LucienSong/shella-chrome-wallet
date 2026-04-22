@@ -50,6 +50,16 @@ try {
       entryPoints: [join(root, 'src/store.ts')],
       outfile: join(dist, 'store.js'),
     }),
+    esbuild.build({
+      ...sharedConfig,
+      entryPoints: [join(root, 'src/content.ts')],
+      outfile: join(dist, 'content.js'),
+    }),
+    esbuild.build({
+      ...sharedConfig,
+      entryPoints: [join(root, 'src/inpage.ts')],
+      outfile: join(dist, 'inpage.js'),
+    }),
   ]);
   console.log('✓ Build complete → dist/');
 } catch (err) {
