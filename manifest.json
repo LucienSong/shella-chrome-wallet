@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Shella Wallet",
-  "version": "0.17.0",
+  "version": "0.3.0",
   "description": "Post-quantum Chrome wallet for Shell Chain",
   "permissions": ["storage", "alarms"],
   "host_permissions": ["http://*/*", "https://*/*"],

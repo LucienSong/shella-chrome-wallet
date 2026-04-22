@@ -1,6 +1,6 @@
 {
   "name": "shella-chrome-wallet",
-  "version": "0.17.0",
+  "version": "0.3.0",
   "description": "Post-quantum Chrome wallet extension for Shell Chain",
   "private": true,
   "type": "module",
