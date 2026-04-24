@@ -266,15 +266,17 @@ async function getWalletSnapshot(): Promise<WalletSnapshot> {
       balance: null,
       nonce: null,
       detectedChainId: null,
+      nodeInfo: null,
     };
   }
 
   try {
     const provider = buildProvider(wallet.network);
-    const [balance, nonce, detectedChainId] = await Promise.all([
+    const [balance, nonce, detectedChainId, nodeInfo] = await Promise.all([
       provider.client.getBalance({ address: primaryAccount.hexAddress as `0x${string}` }),
       provider.client.getTransactionCount({ address: primaryAccount.hexAddress as `0x${string}` }),
       provider.client.getChainId(),
+      getNodeInfoFromNode(wallet.network.rpcUrl).catch(() => null),
     ]);
     return {
       locked,
@@ -286,6 +288,7 @@ async function getWalletSnapshot(): Promise<WalletSnapshot> {
       },
       nonce,
       detectedChainId,
+      nodeInfo,
     };
   } catch {
     return {
@@ -295,6 +298,7 @@ async function getWalletSnapshot(): Promise<WalletSnapshot> {
       balance: null,
       nonce: null,
       detectedChainId: null,
+      nodeInfo: null,
     };
   }
 }
@@ -820,6 +824,12 @@ function normalizeRemoteTxRecord(value: unknown): WalletTxRecord | null {
   const storedValue = optionalString(tx.value);
   if (!txHash || !from || !to || !storedValue) return null;
 
+  // AA bundle info
+  const txType = optionalString(tx.type);
+  const bundle = tx.aa_bundle as Record<string, unknown> | null | undefined;
+  const innerCalls = Array.isArray(bundle?.inner_calls) ? bundle!.inner_calls : null;
+  const paymaster = bundle?.paymaster ? optionalString(bundle.paymaster as unknown) : null;
+
   return {
     txHash,
     from,
@@ -831,6 +841,9 @@ function normalizeRemoteTxRecord(value: unknown): WalletTxRecord | null {
     status: normalizeRemoteStatus(optionalString(tx.status)),
     blockNumber: optionalString(tx.blockNumber) ?? null,
     source: 'remote',
+    txType: txType ?? undefined,
+    paymaster: paymaster ?? null,
+    innerCallCount: innerCalls != null ? innerCalls.length : null,
   };
 }
 

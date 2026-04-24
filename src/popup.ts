@@ -4,9 +4,11 @@
  */
 
 import type {
+  AaBatchInnerCall,
   ApprovalRequest,
   ConnectedSitePermission,
   Network,
+  WalletNodeInfo,
   WalletSnapshot,
   WalletTxRecord,
 } from './types.js';
@@ -44,6 +46,7 @@ interface AppState {
   txQueue: WalletTxRecord[];
   error: string;
   toast: string;
+  nodeInfo: WalletNodeInfo | null;
   // Temp fields for flows
   pendingKeystoreJson: string;
   sendTo: string;
@@ -70,6 +73,7 @@ const state: AppState = {
   txQueue: [],
   error: '',
   toast: '',
+  nodeInfo: null,
   pendingKeystoreJson: '',
   sendTo: '',
   sendValue: '',
@@ -296,6 +300,15 @@ function renderWallet(): string {
   const pendingTxs = state.txQueue.filter((tx) => tx.status === 'pending').slice(0, 3);
   const networkWarning = getNetworkWarning();
   const failedTx = getLatestFailedTx();
+
+  // Storage profile badge (v0.18.0)
+  const storageProfile = state.nodeInfo?.storage_profile;
+  const storageProfileHtml = storageProfile
+    ? `<span class="storage-badge storage-badge-${storageProfile}" title="Node storage mode">
+        ${storageProfile === 'archive' ? '🗄' : storageProfile === 'full' ? '💾' : '🔍'} ${storageProfile}
+       </span>`
+    : '';
+
   const pendingHtml = pendingTxs.length > 0
     ? `
       <div class="pending-card">
@@ -303,7 +316,7 @@ function renderWallet(): string {
         ${pendingTxs.map((tx) => `
           <div class="pending-item">
             <span class="monospace">${truncate(tx.txHash, 8, 6)}</span>
-            <span>${formatDisplayValue(tx.value)} SHELL</span>
+            <span>${tx.txType === '0x7e' ? '⚡ Batch' : formatDisplayValue(tx.value) + ' SHELL'}</span>
           </div>
         `).join('')}
       </div>
@@ -329,6 +342,7 @@ function renderWallet(): string {
           <option value="testnet" ${state.network.name === 'Shell Testnet' ? 'selected' : ''}>⬡ Testnet</option>
           <option value="mainnet" ${state.network.name === 'Shell Mainnet' ? 'selected' : ''}>⬡ Mainnet</option>
         </select>
+        ${storageProfileHtml}
         <button class="btn-icon" id="btn-settings" title="Settings">⚙</button>
         <button class="btn-icon" id="btn-lock" title="Lock wallet">🔒</button>
       </div>
@@ -428,14 +442,23 @@ function renderReceive(): string {
 function renderHistory(): string {
   const txItems = state.txHistory.length > 0
     ? state.txHistory.map((tx) => {
-        const dir = tx.from.toLowerCase() === state.hexAddress.toLowerCase() ? '↑ Sent' : '↓ Received';
-        const val = formatDisplayValue(tx.value);
+        const isOutgoing = tx.from.toLowerCase() === state.hexAddress.toLowerCase();
+        const isBatch = tx.txType === '0x7e';
+        const isSponsored = !!tx.paymaster;
+        const dir = isBatch
+          ? `⚡ Batch${tx.innerCallCount != null ? ` (${tx.innerCallCount} calls)` : ''}`
+          : (isOutgoing ? '↑ Sent' : '↓ Received');
+        const val = isBatch ? '' : formatDisplayValue(tx.value) + ' SHELL';
         const hash = tx.txHash ? truncate(tx.txHash, 8, 6) : '–';
+        const sponsoredBadge = isSponsored
+          ? `<span class="badge badge-sponsored" title="Gas sponsored by paymaster">⚡ Sponsored</span>`
+          : '';
         return `
-          <div class="tx-item">
+          <div class="tx-item${isBatch ? ' tx-item-batch' : ''}">
             <span class="tx-dir">${dir}</span>
             <span class="tx-hash monospace">${hash}</span>
-            <span class="tx-value">${val} SHELL</span>
+            ${val ? `<span class="tx-value">${val}</span>` : ''}
+            ${sponsoredBadge}
             <span class="tx-status ${tx.status}">${tx.status}</span>
           </div>
         `;
@@ -518,14 +541,66 @@ function renderApprovalRequest(): string {
     `;
   }
 
-  const details = Object.entries(request.payload)
-    .map(([key, value]) => `
-      <div class="approval-row">
-        <span class="approval-key">${key}</span>
-        <span class="approval-value monospace">${String(value)}</span>
+  // Detect AA batch transaction (tx_type = 0x7e)
+  const isBatchTx = request.kind === 'send-transaction' &&
+    (request.payload.tx_type === '0x7e' || request.payload.tx_type === 126);
+
+  let detailsHtml: string;
+
+  if (isBatchTx) {
+    const innerCalls = Array.isArray(request.payload.inner_calls)
+      ? (request.payload.inner_calls as AaBatchInnerCall[])
+      : [];
+    const paymaster = request.payload.paymaster as string | null | undefined;
+    const isSponsored = !!paymaster;
+
+    const callsHtml = innerCalls.length > 0
+      ? innerCalls.map((call, i) => `
+          <div class="inner-call-item">
+            <div class="inner-call-index">#${i + 1}</div>
+            <div class="approval-row">
+              <span class="approval-key">To</span>
+              <span class="approval-value monospace">${call.to}</span>
+            </div>
+            <div class="approval-row">
+              <span class="approval-key">Value</span>
+              <span class="approval-value">${formatDisplayValue(call.value || '0')} SHELL</span>
+            </div>
+            <div class="approval-row">
+              <span class="approval-key">Gas</span>
+              <span class="approval-value">${call.gas_limit}</span>
+            </div>
+            ${call.data && call.data !== '0x'
+              ? `<div class="approval-row"><span class="approval-key">Data</span><span class="approval-value monospace" style="word-break:break-all">${call.data.slice(0, 32)}…</span></div>`
+              : ''}
+          </div>
+        `).join('')
+      : '<div class="hint">No inner calls</div>';
+
+    detailsHtml = `
+      <div class="approval-card">
+        <div class="batch-header">
+          <span class="badge badge-batch">⚡ AA Batch (${innerCalls.length} call${innerCalls.length !== 1 ? 's' : ''})</span>
+          ${isSponsored ? `<span class="badge badge-sponsored">⚡ Sponsored</span>` : ''}
+        </div>
+        ${isSponsored ? `<div class="approval-row"><span class="approval-key">Paymaster</span><span class="approval-value monospace">${paymaster}</span></div>` : ''}
+        <div class="inner-calls-list">${callsHtml}</div>
       </div>
-    `)
-    .join('');
+    `;
+  } else {
+    detailsHtml = `
+      <div class="approval-card">
+        ${Object.entries(request.payload)
+          .map(([key, value]) => `
+            <div class="approval-row">
+              <span class="approval-key">${key}</span>
+              <span class="approval-value monospace">${String(value)}</span>
+            </div>
+          `)
+          .join('')}
+      </div>
+    `;
+  }
 
   return `
     <div class="view-form">
@@ -533,7 +608,7 @@ function renderApprovalRequest(): string {
       <h2>Approve Request</h2>
       <p class="hint">${request.origin}</p>
       <div class="status-card status-card-warning">This site is requesting: <strong>${request.kind}</strong></div>
-      <div class="approval-card">${details}</div>
+      ${detailsHtml}
       ${state.error ? `<div class="error">${state.error}</div>` : ''}
       <button id="btn-approval-approve" class="btn-primary">Approve</button>
       <button id="btn-approval-reject" class="btn-secondary">Reject</button>
@@ -964,6 +1039,7 @@ async function refreshWalletData(): Promise<void> {
   state.connectedSites = snapshot.wallet.connectedSites;
   state.detectedChainId = snapshot.detectedChainId;
   state.nonce = snapshot.nonce;
+  state.nodeInfo = snapshot.nodeInfo ?? null;
   if (snapshot.primaryAccount) {
     state.pqAddress = snapshot.primaryAccount.pqAddress;
     state.hexAddress = snapshot.primaryAccount.hexAddress;
@@ -1029,6 +1105,7 @@ async function boot(): Promise<void> {
   state.connectedSites = snapshot.wallet.connectedSites;
   state.detectedChainId = snapshot.detectedChainId;
   state.nonce = snapshot.nonce;
+  state.nodeInfo = snapshot.nodeInfo ?? null;
 
   if (!snapshot.primaryAccount) {
     state.view = 'welcome';

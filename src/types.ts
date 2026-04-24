@@ -33,6 +33,12 @@ export interface WalletTxRecord {
   error?: string;
   blockNumber?: string | null;
   source: 'local' | 'remote';
+  /** tx_type value (0x2 = standard, 0x7e = AA batch) */
+  txType?: string;
+  /** Paymaster address if this was a sponsored tx */
+  paymaster?: string | null;
+  /** Number of inner calls if this is an AA batch tx */
+  innerCallCount?: number | null;
 }
 
 export interface WalletState {
@@ -87,6 +93,14 @@ export interface DappRequestMessage {
   method: string;
   params?: unknown[];
   interactive?: boolean;
+}
+
+/** Represents one inner call inside an AA batch tx approval request. */
+export interface AaBatchInnerCall {
+  to: string;
+  value: string;
+  data: string;
+  gas_limit: number;
 }
 
 export interface ApprovalRequest {

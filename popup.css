@@ -551,3 +551,48 @@ input:focus, .select-input:focus { border-color: #1a6ef5; }
 /* ── Animations ── */
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fadeIn { from { opacity: 0; transform: translateX(-50%) translateY(-6px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+
+/* ── v0.18.0: Storage profile badge ── */
+.storage-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin-left: auto;
+}
+.storage-badge-archive { background: #1a3a1a; color: #4ade80; border: 1px solid #2d6a2d; }
+.storage-badge-full    { background: #1a2a3a; color: #60a5fa; border: 1px solid #2d4a6a; }
+.storage-badge-light   { background: #2a2a1a; color: #facc15; border: 1px solid #5a5a1a; }
+
+/* ── v0.18.0: AA batch & sponsored badges ── */
+.badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+  margin-right: 4px;
+}
+.badge-batch    { background: #1a2a3a; color: #60a5fa; border: 1px solid #2d4a6a; }
+.badge-sponsored { background: #1a2a1a; color: #4ade80; border: 1px solid #2a5a2a; }
+
+/* ── v0.18.0: Inner calls list ── */
+.batch-header { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.inner-calls-list { display: flex; flex-direction: column; gap: 6px; }
+.inner-call-item {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.inner-call-index {
+  font-size: 10px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+/* ── v0.18.0: Batch tx item in history ── */
+.tx-item-batch { border-left: 2px solid #60a5fa; }

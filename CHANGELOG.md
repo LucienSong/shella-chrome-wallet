@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.18.0] — 2026-04-24
+
+### Added
+- **Storage profile badge** in wallet header: shows node's storage mode (`archive` / `full` / `light`) fetched via `shell_getNodeInfo`. Included in `GET_WALLET_SNAPSHOT` response.
+- **AA batch transaction display** (v0.18.0): history items with `tx_type = 0x7e` show `⚡ Batch (N calls)` label and a blue left border.
+- **Sponsored gas indicator**: transactions with a `paymaster` address show a `⚡ Sponsored` badge in transaction history.
+- **AA batch approval UI**: when a dApp sends a `send-transaction` approval with `tx_type = 0x7e`, the approval screen shows each inner call with its destination, value, gas limit, and calldata.
+- `AaBatchInnerCall` type in `types.ts` for structured inner call rendering.
+- `WalletTxRecord` extended with `txType`, `paymaster`, and `innerCallCount` fields for AA-aware history.
+- `normalizeRemoteTxRecord` now extracts `aa_bundle` fields (paymaster, inner call count) from chain RPC responses.
+- CSS additions: `.storage-badge`, `.badge`, `.badge-batch`, `.badge-sponsored`, `.inner-calls-list`, `.tx-item-batch`.
+
+### Changed
+- `getWalletSnapshot` now fetches node info in parallel with balance/nonce/chainId.
+- Wallet version aligned to `shell-chain v0.18.0` release track.
+- sdk bumped to `0.4.0` (local file dependency).
+
 ## [0.3.0] — 2026-04-22
 
 ### Added
