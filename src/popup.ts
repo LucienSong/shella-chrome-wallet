@@ -3,6 +3,7 @@
  * Multi-view SPA rendered into #app.
  */
 
+import QRCode from 'qrcode';
 import type {
   AaBatchInnerCall,
   ApprovalRequest,
@@ -29,6 +30,10 @@ type View =
   | 'receive'
   | 'history'
   | 'settings'
+  | 'accounts'
+  | 'add-account'
+  | 'add-account-generating'
+  | 'switch-account'
   | 'approval-request';
 
 interface AppState {
@@ -46,6 +51,10 @@ interface AppState {
   error: string;
   toast: string;
   nodeInfo: WalletNodeInfo | null;
+  // Multi-account state
+  accounts: Array<{ pqAddress: string }>;
+  selectedTxHash: string;
+  switchTargetAddress: string;
   // Temp fields for flows
   pendingKeystoreJson: string;
   sendTo: string;
@@ -80,6 +89,9 @@ const state: AppState = {
   sendMaxFeePerGas: '',
   sendMaxPriorityFeePerGas: '',
   approvalRequest: null,
+  accounts: [],
+  selectedTxHash: '',
+  switchTargetAddress: '',
 };
 
 function escapeHtml(value: unknown): string {
@@ -162,6 +174,10 @@ function render(): void {
     receive: renderReceive,
     history: renderHistory,
     settings: renderSettings,
+    accounts: renderAccounts,
+    'add-account': renderAddAccount,
+    'add-account-generating': renderAddAccountGenerating,
+    'switch-account': renderSwitchAccount,
     'approval-request': renderApprovalRequest,
   };
   
@@ -301,10 +317,23 @@ function renderImportPassword(): string {
 }
 
 function renderLocked(): string {
+    const accountSelectorHtml = state.accounts.length > 1
+    ? `<label>Account
+        <select id="unlock-account-select">
+          ${state.accounts.map(a =>
+            `<option value="${escapeHtml(a.pqAddress)}" ${a.pqAddress === state.pqAddress ? 'selected' : ''}>
+               ${truncate(a.pqAddress)}
+             </option>`
+          ).join('')}
+        </select>
+      </label>`
+    : '';
+
   return `
     <div class="view-form">
       <div class="logo">🔒</div>
       <h2>Wallet Locked</h2>
+      ${accountSelectorHtml}
       <p class="hint">${truncate(state.pqAddress) || 'Enter your password to unlock.'}</p>
       <label>Password
         <input type="password" id="unlock-pwd" placeholder="Enter password" autocomplete="current-password" autofocus />
@@ -362,6 +391,7 @@ function renderWallet(): string {
           <option value="mainnet" ${state.network.name === 'Shell Mainnet' ? 'selected' : ''}>⬡ Mainnet</option>
         </select>
         ${storageProfileHtml}
+        <button class="btn-icon" id="btn-accounts" title="Accounts (${state.accounts.length})">👤</button>
         <button class="btn-icon" id="btn-settings" title="Settings">⚙</button>
         <button class="btn-icon" id="btn-lock" title="Lock wallet">🔒</button>
       </div>
@@ -441,8 +471,8 @@ function renderReceive(): string {
       <button class="btn-back" id="btn-back">← Back</button>
       <h2>Receive SHELL</h2>
       <p class="hint">Share your address to receive funds.</p>
-      <div class="qr-placeholder">
-        <div class="qr-icon">📲</div>
+      <div class="qr-wrapper" style="display:flex;justify-content:center;margin:12px 0">
+        <canvas id="qr-canvas"></canvas>
       </div>
       <div class="address-box">
         <span class="monospace address-full" id="full-addr">${state.pqAddress}</span>
@@ -462,16 +492,27 @@ function renderHistory(): string {
         const dir = readableType !== 'Transfer' ? readableType : (isOutgoing ? '↑ Sent' : '↓ Received');
         const val = isBatch ? '' : formatDisplayValue(tx.value) + ' SHELL';
         const hash = tx.txHash ? truncate(tx.txHash, 8, 6) : '–';
+        const isExpanded = state.selectedTxHash === tx.txHash;
         const sponsoredBadge = isSponsored
           ? `<span class="badge badge-sponsored" title="Gas sponsored by paymaster">⚡ Sponsored</span>`
           : '';
+        const detail = isExpanded ? `
+          <div class="tx-detail">
+            <div class="tx-detail-row"><span>Hash</span><span class="monospace">${escapeHtml(tx.txHash ?? '–')}</span></div>
+            <div class="tx-detail-row"><span>From</span><span class="monospace">${escapeHtml(truncate(tx.from, 10, 8))}</span></div>
+            <div class="tx-detail-row"><span>To</span><span class="monospace">${escapeHtml(truncate(tx.to ?? '–', 10, 8))}</span></div>
+            <div class="tx-detail-row"><span>Value</span><span>${escapeHtml(formatDisplayValue(tx.value))} SHELL</span></div>
+            <div class="tx-detail-row"><span>Status</span><span>${escapeHtml(tx.status)}</span></div>
+            ${tx.error ? `<div class="tx-detail-row tx-detail-error"><span>Error</span><span>${escapeHtml(tx.error)}</span></div>` : ''}
+          </div>` : '';
         return `
-          <div class="tx-item${isBatch ? ' tx-item-batch' : ''}">
+          <div class="tx-item${isBatch ? ' tx-item-batch' : ''} tx-item-clickable" data-txhash="${escapeHtml(tx.txHash ?? '')}">
             <span class="tx-dir">${dir}</span>
             <span class="tx-hash monospace">${hash}</span>
             ${val ? `<span class="tx-value">${val}</span>` : ''}
             ${sponsoredBadge}
             <span class="tx-status ${tx.status}">${tx.status}</span>
+            ${detail}
           </div>
         `;
       }).join('')
@@ -508,6 +549,76 @@ export function formatTxHistoryLabel(tx: WalletTxRecord): string {
   const type = formatTxHistoryType(tx);
   if (type !== 'Transfer') return type;
   return `${formatDisplayValue(tx.value)} SHELL`;
+}
+
+function renderAccounts(): string {
+  const accountsHtml = state.accounts.map((acct, i) => {
+    const isActive = acct.pqAddress === state.pqAddress;
+    return `
+      <div class="account-item${isActive ? ' account-item-active' : ''}">
+        <div class="account-item-info">
+          <span class="account-label">Account ${i + 1}</span>
+          <span class="monospace account-address">${truncate(acct.pqAddress)}</span>
+          ${isActive ? '<span class="badge badge-active">Active</span>' : ''}
+        </div>
+        <div class="account-item-actions">
+          ${!isActive
+            ? `<button class="btn-secondary btn-switch-account" data-address="${escapeHtml(acct.pqAddress)}">Switch</button>`
+            : ''}
+          <button class="btn-secondary btn-copy-account" data-address="${escapeHtml(acct.pqAddress)}">Copy</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Accounts</h2>
+      <div class="account-list">${accountsHtml}</div>
+      <button id="btn-add-account" class="btn-secondary" style="margin-top:16px">+ Add Account</button>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderAddAccount(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Add Account</h2>
+      <p class="hint">Set a password to protect this account's keystore. You will need it to switch to this account.</p>
+      <label>Password
+        <input type="password" id="add-account-pwd1" placeholder="Password (min 8 chars)" autocomplete="new-password" />
+      </label>
+      <label>Confirm Password
+        <input type="password" id="add-account-pwd2" placeholder="Confirm password" autocomplete="new-password" />
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-add-account-confirm" class="btn-primary">Generate Account</button>
+    </div>
+  `;
+}
+
+function renderAddAccountGenerating(): string {
+  return `<div class="center"><div class="spinner"></div><p>Generating new account…</p></div>`;
+}
+
+function renderSwitchAccount(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Switch Account</h2>
+      <p class="hint">Enter the password for this account:</p>
+      <div class="address-box" style="margin-bottom:12px">
+        <span class="monospace">${truncate(state.switchTargetAddress)}</span>
+      </div>
+      <label>Password
+        <input type="password" id="switch-account-pwd" placeholder="Account password" autocomplete="current-password" autofocus />
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-switch-account-confirm" class="btn-primary">Switch</button>
+    </div>
+  `;
 }
 
 function renderSettings(): string {
@@ -705,6 +816,9 @@ function attachHandlers(): void {
       receive: 'wallet',
       history: 'wallet',
       settings: 'wallet',
+      accounts: 'wallet',
+      'add-account': 'accounts',
+      'switch-account': 'accounts',
     };
     state.view = backMap[state.view] ?? 'wallet';
     render();
@@ -800,11 +914,12 @@ function attachHandlers(): void {
   on('btn-unlock', 'click', async () => {
     const pwd = (document.getElementById('unlock-pwd') as HTMLInputElement)?.value;
     if (!pwd) return;
+    const selectedAddress = (document.getElementById('unlock-account-select') as HTMLSelectElement | null)?.value;
     state.error = '';
     state.view = 'unlocking';
     render();
     try {
-      await send('UNLOCK_WALLET', { password: pwd });
+      await send('UNLOCK_WALLET', { password: pwd, ...(selectedAddress ? { address: selectedAddress } : {}) });
       await refreshWalletData();
       state.view = 'wallet';
       render();
@@ -830,6 +945,99 @@ function attachHandlers(): void {
     state.view = 'settings';
     render();
   });
+
+  on('btn-accounts', 'click', () => {
+    state.error = '';
+    state.view = 'accounts';
+    render();
+  });
+
+  // Add account flow
+  on('btn-add-account', 'click', () => {
+    state.error = '';
+    state.view = 'add-account';
+    render();
+  });
+
+  on('btn-add-account-confirm', 'click', async () => {
+    const pwd1 = (document.getElementById('add-account-pwd1') as HTMLInputElement)?.value;
+    const pwd2 = (document.getElementById('add-account-pwd2') as HTMLInputElement)?.value;
+    if (!pwd1 || pwd1.length < 8) {
+      state.error = 'Password must be at least 8 characters';
+      render();
+      return;
+    }
+    if (pwd1 !== pwd2) {
+      state.error = 'Passwords do not match';
+      render();
+      return;
+    }
+    state.error = '';
+    state.view = 'add-account-generating';
+    render();
+    try {
+      await send<{ pqAddress: string }>('ADD_ACCOUNT', { password: pwd1 });
+      await refreshWalletData();
+      state.view = 'accounts';
+      render();
+    } catch (err) {
+      state.error = (err as Error).message;
+      state.view = 'add-account';
+      render();
+    }
+  });
+
+  // Switch account: clicking Switch on an account row
+  document.querySelectorAll('.btn-switch-account').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.error = '';
+      state.switchTargetAddress = (btn as HTMLElement).dataset.address ?? '';
+      state.view = 'switch-account';
+      render();
+    });
+  });
+
+  // Copy address from accounts list
+  document.querySelectorAll('.btn-copy-account').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const addr = (btn as HTMLElement).dataset.address ?? '';
+      copyText(addr, 'Address copied');
+    });
+  });
+
+  on('btn-switch-account-confirm', 'click', async () => {
+    const pwd = (document.getElementById('switch-account-pwd') as HTMLInputElement)?.value;
+    if (!pwd) return;
+    state.error = '';
+    try {
+      await send('SWITCH_ACCOUNT', { password: pwd, address: state.switchTargetAddress });
+      await refreshWalletData();
+      state.view = 'wallet';
+      render();
+    } catch (err) {
+      state.error = (err as Error).message;
+      render();
+    }
+  });
+
+  // History tx click-to-expand detail
+  document.querySelectorAll('.tx-item-clickable').forEach((item) => {
+    item.addEventListener('click', () => {
+      const hash = (item as HTMLElement).dataset.txhash ?? '';
+      state.selectedTxHash = state.selectedTxHash === hash ? '' : hash;
+      render();
+    });
+  });
+
+  // QR code for receive view
+  if (state.view === 'receive') {
+    const canvas = document.getElementById('qr-canvas') as HTMLCanvasElement | null;
+    if (canvas && state.pqAddress) {
+      QRCode.toCanvas(canvas, state.pqAddress, { width: 180, margin: 2 }).catch(() => {
+        // QR generation failed silently — address still shown as text
+      });
+    }
+  }
 
   // Quick network switcher in wallet header
   const quickNetSelect = document.getElementById('quick-net-select') as HTMLSelectElement | null;
@@ -1096,7 +1304,10 @@ async function refreshWalletData(): Promise<void> {
   state.detectedChainId = snapshot.detectedChainId;
   state.nonce = snapshot.nonce;
   state.nodeInfo = snapshot.nodeInfo ?? null;
-  if (snapshot.primaryAccount) {
+  state.accounts = snapshot.wallet.accounts ?? [];
+  if (snapshot.activeAddress) {
+    state.pqAddress = snapshot.activeAddress;
+  } else if (snapshot.primaryAccount) {
     state.pqAddress = snapshot.primaryAccount.pqAddress;
   }
   if (snapshot.balance) {
@@ -1161,14 +1372,15 @@ async function boot(): Promise<void> {
   state.detectedChainId = snapshot.detectedChainId;
   state.nonce = snapshot.nonce;
   state.nodeInfo = snapshot.nodeInfo ?? null;
+  state.accounts = snapshot.wallet.accounts ?? [];
 
   if (!snapshot.primaryAccount) {
     state.view = 'welcome';
   } else if (snapshot.locked) {
-    state.pqAddress = snapshot.primaryAccount.pqAddress;
+    state.pqAddress = snapshot.activeAddress ?? snapshot.primaryAccount.pqAddress;
     state.view = 'locked';
   } else {
-    state.pqAddress = snapshot.primaryAccount.pqAddress;
+    state.pqAddress = snapshot.activeAddress ?? snapshot.primaryAccount.pqAddress;
     if (snapshot.balance) {
       state.balance = snapshot.balance.raw;
       state.balanceFormatted = snapshot.balance.formatted;

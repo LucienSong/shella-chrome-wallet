@@ -209,3 +209,12 @@ export async function clearAllData(): Promise<void> {
   await chrome.storage.session.clear();
   await initStore();
 }
+
+export async function getLastActiveAddress(): Promise<string | null> {
+  const { lastActiveAddress } = await chrome.storage.local.get('lastActiveAddress');
+  return typeof lastActiveAddress === 'string' ? lastActiveAddress : null;
+}
+
+export async function setLastActiveAddress(address: string): Promise<void> {
+  await chrome.storage.local.set({ lastActiveAddress: address });
+}

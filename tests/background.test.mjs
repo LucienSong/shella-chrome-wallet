@@ -581,3 +581,98 @@ test('WALLET-M2: privileged messages from content scripts are blocked', async ()
 });
 
 }); // describe('background e2e')
+
+// ──────── Multi-account tests ────────
+
+describe('multi-account', () => {
+  const PASSWORD = 'correct horse battery';
+  const PASSWORD2 = 'different horse battery';
+
+  async function resetAndCreate() {
+    await handleMessage({ type: 'RESET_WALLET' });
+    return handleMessage({ type: 'CREATE_WALLET', password: PASSWORD });
+  }
+
+  test('ADD_ACCOUNT creates a second account without changing active signer', async () => {
+    const first = await resetAndCreate();
+    const signerAddressBefore = (await handleMessage({ type: 'GET_WALLET_SNAPSHOT' })).activeAddress;
+
+    const second = await handleMessage({ type: 'ADD_ACCOUNT', password: PASSWORD2 });
+    assert.ok(second.pqAddress, 'ADD_ACCOUNT must return a pqAddress');
+    assert.notEqual(second.pqAddress, first.pqAddress, 'Second account must have a different address');
+
+    // Active signer must remain unchanged
+    const snapshot = await handleMessage({ type: 'GET_WALLET_SNAPSHOT' });
+    assert.equal(snapshot.activeAddress, signerAddressBefore, 'Active account must not change after ADD_ACCOUNT');
+    assert.equal(snapshot.wallet.accounts.length, 2, 'Wallet must now have two accounts');
+  });
+
+  test('SWITCH_ACCOUNT changes the active signer to the target account', async () => {
+    const first = await resetAndCreate();
+    const second = await handleMessage({ type: 'ADD_ACCOUNT', password: PASSWORD2 });
+
+    const switched = await handleMessage({ type: 'SWITCH_ACCOUNT', password: PASSWORD2, address: second.pqAddress });
+    assert.ok(switched.ok, 'SWITCH_ACCOUNT must return ok: true');
+    assert.equal(switched.pqAddress, second.pqAddress, 'SWITCH_ACCOUNT must return the new address');
+
+    const snapshot = await handleMessage({ type: 'GET_WALLET_SNAPSHOT' });
+    assert.equal(snapshot.activeAddress, second.pqAddress, 'Active address must be the switched-to account');
+    assert.notEqual(snapshot.activeAddress, first.pqAddress, 'Must no longer be the first account');
+  });
+
+  test('SWITCH_ACCOUNT with wrong password throws and leaves signer unchanged', async () => {
+    await resetAndCreate();
+    const second = await handleMessage({ type: 'ADD_ACCOUNT', password: PASSWORD2 });
+
+    const snapshotBefore = await handleMessage({ type: 'GET_WALLET_SNAPSHOT' });
+    let threw = false;
+    try {
+      await handleMessage({ type: 'SWITCH_ACCOUNT', password: 'wrongpassword', address: second.pqAddress });
+    } catch {
+      threw = true;
+    }
+    assert.ok(threw, 'SWITCH_ACCOUNT with wrong password must throw');
+
+    const snapshotAfter = await handleMessage({ type: 'GET_WALLET_SNAPSHOT' });
+    assert.equal(snapshotAfter.activeAddress, snapshotBefore.activeAddress, 'Signer must be unchanged after failed switch');
+  });
+
+  test('SWITCH_ACCOUNT with unknown address throws', async () => {
+    await resetAndCreate();
+
+    let threw = false;
+    try {
+      await handleMessage({ type: 'SWITCH_ACCOUNT', password: PASSWORD, address: '0x' + 'ab'.repeat(32) });
+    } catch {
+      threw = true;
+    }
+    assert.ok(threw, 'SWITCH_ACCOUNT with unknown address must throw');
+  });
+
+  test('EXPORT_KEYSTORE exports the currently active account', async () => {
+    const first = await resetAndCreate();
+    const second = await handleMessage({ type: 'ADD_ACCOUNT', password: PASSWORD2 });
+
+    // Before switch — should export first account
+    const exportedFirst = await handleMessage({ type: 'EXPORT_KEYSTORE' });
+    const parsedFirst = JSON.parse(exportedFirst.keystoreJson);
+    assert.equal(parsedFirst.address, first.pqAddress, 'EXPORT_KEYSTORE must export the active (first) account');
+
+    // After switch — should export second account
+    await handleMessage({ type: 'SWITCH_ACCOUNT', password: PASSWORD2, address: second.pqAddress });
+    const exportedSecond = await handleMessage({ type: 'EXPORT_KEYSTORE' });
+    const parsedSecond = JSON.parse(exportedSecond.keystoreJson);
+    assert.equal(parsedSecond.address, second.pqAddress, 'EXPORT_KEYSTORE must export the switched-to account');
+  });
+
+  test('UNLOCK_WALLET with explicit address unlocks that specific account', async () => {
+    await resetAndCreate();
+    const second = await handleMessage({ type: 'ADD_ACCOUNT', password: PASSWORD2 });
+
+    await handleMessage({ type: 'LOCK_WALLET' });
+
+    const unlocked = await handleMessage({ type: 'UNLOCK_WALLET', password: PASSWORD2, address: second.pqAddress });
+    assert.ok(unlocked.ok, 'UNLOCK_WALLET with address must return ok: true');
+    assert.equal(unlocked.pqAddress, second.pqAddress, 'Must unlock the specified account');
+  });
+});
