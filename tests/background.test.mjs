@@ -107,6 +107,7 @@ globalThis.fetch = async (url, init) => {
 };
 
 const { handleMessage } = await import('../dist/background.js');
+const SHELL_ADDRESS_RE = /^0x[0-9a-f]{64}$/;
 
 function resetAlarmState() {
   createdAlarms.length = 0;
@@ -142,7 +143,7 @@ test('create wallet -> snapshot -> export -> reset -> import', async () => {
   await handleMessage({ type: 'RESET_WALLET' });
 
   const created = await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
-  assert.match(created.pqAddress, /^pq1/);
+  assert.match(created.pqAddress, SHELL_ADDRESS_RE);
 
   const snapshot = await handleMessage({ type: 'GET_WALLET_SNAPSHOT' });
   assert.equal(snapshot.locked, false);
@@ -522,6 +523,7 @@ test('WALLET-H2: wallet_addEthereumChain rejects non-https and private IP RPC UR
     'http://192.168.1.1:8545',
     'http://10.0.0.1',
     'http://172.16.0.1',
+    'https://127.0.0.2',
     'ftp://rpc.example',
     'javascript:alert(1)',
     'not-a-url',
