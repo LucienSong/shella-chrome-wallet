@@ -227,7 +227,7 @@ function renderCreatePassword(): string {
       <label>Confirm Password
         <input type="password" id="pwd2" placeholder="Confirm password" autocomplete="new-password" />
       </label>
-      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
       <button id="btn-confirm-pwd" class="btn-primary">Create Wallet</button>
     </div>
   `;
@@ -296,7 +296,7 @@ function renderImportFile(): string {
           📄 Click to choose keystore file
         </label>
       </div>
-      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
     </div>
   `;
 }
@@ -310,7 +310,7 @@ function renderImportPassword(): string {
       <label>Password
         <input type="password" id="import-pwd" placeholder="Keystore password" autocomplete="current-password" />
       </label>
-      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
       <button id="btn-confirm-import" class="btn-primary">Import Wallet</button>
     </div>
   `;
@@ -338,7 +338,7 @@ function renderLocked(): string {
       <label>Password
         <input type="password" id="unlock-pwd" placeholder="Enter password" autocomplete="current-password" autofocus />
       </label>
-      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
       <button id="btn-unlock" class="btn-primary">Unlock</button>
     </div>
   `;
@@ -457,7 +457,7 @@ function renderSend(): string {
         <span class="label">Next nonce:</span>
         <span class="fee-amount">${state.nonce == null ? 'unknown' : state.nonce}</span>
       </div>
-      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
       <button id="btn-send-confirm" class="btn-primary" ${sendDisabled ? 'disabled' : ''}>
         ${sendDisabled ? 'Fix network before sending' : 'Send'}
       </button>
@@ -576,7 +576,7 @@ function renderAccounts(): string {
       <h2>Accounts</h2>
       <div class="account-list">${accountsHtml}</div>
       <button id="btn-add-account" class="btn-secondary" style="margin-top:16px">+ Add Account</button>
-      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
     </div>
   `;
 }
@@ -593,7 +593,7 @@ function renderAddAccount(): string {
       <label>Confirm Password
         <input type="password" id="add-account-pwd2" placeholder="Confirm password" autocomplete="new-password" />
       </label>
-      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
       <button id="btn-add-account-confirm" class="btn-primary">Generate Account</button>
     </div>
   `;
@@ -615,7 +615,7 @@ function renderSwitchAccount(): string {
       <label>Password
         <input type="password" id="switch-account-pwd" placeholder="Account password" autocomplete="current-password" autofocus />
       </label>
-      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
       <button id="btn-switch-account-confirm" class="btn-primary">Switch</button>
     </div>
   `;
@@ -780,7 +780,7 @@ function renderApprovalRequest(): string {
       <p class="hint">${escapeHtml(request.origin)}</p>
       <div class="status-card status-card-warning">This site is requesting: <strong>${escapeHtml(request.kind)}</strong></div>
       ${detailsHtml}
-      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ''}
       <button id="btn-approval-approve" class="btn-primary">Approve</button>
       <button id="btn-approval-reject" class="btn-secondary">Reject</button>
     </div>

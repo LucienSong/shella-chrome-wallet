@@ -28,8 +28,9 @@ npm run lint
    - AEAD: XChaCha20-Poly1305 with 24-byte nonce
    - Ciphertext contains the **secret key only** (public key is plaintext
      metadata)
-   - Address binding: derive Bech32m `pq1...` from the public key and
-     embed in the keystore; refuse to decrypt if address mismatches
+   - Address binding: derive canonical Shell `0x` + 64 lowercase hex from
+     the public key and embed it in the keystore; refuse to decrypt if
+     address mismatches
    - Supported algorithms: Dilithium3, ML-DSA-65, SPHINCS+ (algorithm
      identifier in metadata; no algorithm agility inside ciphertext)
 2. **AaBundle wire format** must match the chain exactly: tx type

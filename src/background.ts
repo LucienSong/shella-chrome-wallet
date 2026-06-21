@@ -280,14 +280,20 @@ async function importKeystore(
 
 async function createAdditionalAccount(password: string): Promise<{ pqAddress: string }> {
   const { publicKey: pk, secretKey: sk } = generateMlDsa65KeyPair();
-  const adapter = MlDsa65Adapter.fromKeyPair(pk, sk.slice());
-  const pqAddress = new ShellSigner('MlDsa65', adapter).getAddress();
+  let signer: ShellSigner | null = null;
+  try {
+    const adapter = MlDsa65Adapter.fromKeyPair(pk, sk);
+    signer = new ShellSigner('MlDsa65', adapter);
+    const pqAddress = signer.getAddress();
 
-  const keystore = await createKeystore(sk, pk, password, pqAddress, 'mldsa65');
-  await addStoredAccount({ pqAddress, keystoreJson: JSON.stringify(keystore) });
-  sk.fill(0);
+    const keystore = await createKeystore(sk, pk, password, pqAddress, 'mldsa65');
+    await addStoredAccount({ pqAddress, keystoreJson: JSON.stringify(keystore) });
 
-  return { pqAddress };
+    return { pqAddress };
+  } finally {
+    signer?.dispose();
+    sk.fill(0);
+  }
 }
 
 async function getActiveAccount(): Promise<StoredAccount | null> {
@@ -600,11 +606,15 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
     case 'eth_sendTransaction': {
       ensureConnected(permission, origin);
       if (!currentSigner) throw new Error('Wallet is locked');
+      const permittedAccount = permission.accounts[0];
+      if (!permittedAccount) {
+        throw new Error('No permitted account for this site');
+      }
       const [tx] = normalizeArrayParams(message.params);
       if (!tx || typeof tx !== 'object') throw new Error('eth_sendTransaction requires a transaction object');
       const candidate = tx as Record<string, unknown>;
       const from = optionalString(candidate.from);
-      if (from && from !== permission.accounts[0]) {
+      if (from && from.toLowerCase() !== permittedAccount.toLowerCase()) {
         throw new Error('Requested from account is not permitted for this site');
       }
       const request = {
@@ -620,7 +630,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
         origin,
         createdAt: Date.now(),
         payload: {
-          account: permission.accounts[0],
+          account: permittedAccount,
           to: request.to,
           value: request.value,
           data: request.data ?? '0x',
@@ -767,7 +777,7 @@ function buildConnectedSite(
   const now = Date.now();
   return {
     origin,
-    accounts: [pqAddress],
+    accounts: [pqAddress.toLowerCase()],
     chainId,
     grantedAt,
     lastUsedAt: now,
@@ -824,6 +834,7 @@ function resolveApprovalRequest(requestId: string, approved: boolean): { ok: tru
   if (!pending) throw new Error('Approval request not found');
   if (Date.now() - pending.request.createdAt > APPROVAL_TTL_MS) {
     pendingApprovals.delete(requestId);
+    pending.resolve(false);
     throw new Error('Approval request has expired');
   }
   pendingApprovals.delete(requestId);
