@@ -10,10 +10,10 @@ import { describe, test, before } from 'node:test';
 const domElements = new Map();
 
 function makeEl(id = '') {
-  return {
+  const element = {
     id,
     innerHTML: '',
-    textContent: '',
+    _textContent: '',
     className: '',
     style: { display: '' },
     value: '',
@@ -24,12 +24,23 @@ function makeEl(id = '') {
     appendChild(child) {
       this.children.push(child);
       if (child.id) domElements.set(child.id, child);
-      this.innerHTML += child.id
-        ? `<div id="${child.id}" class="${child.className ?? ''}">${child.innerHTML ?? ''}</div>`
-        : (child.innerHTML ?? '');
+      const attrs = [
+        child.id ? ` id="${child.id}"` : '',
+        child.className ? ` class="${child.className}"` : '',
+      ].join('');
+      this.innerHTML += `<${(child.tagName ?? 'div').toLowerCase()}${attrs}>${child.innerHTML ?? child.textContent ?? ''}</${(child.tagName ?? 'div').toLowerCase()}>`;
+      return child;
     },
     dispatchEvent() {},
   };
+  Object.defineProperty(element, 'textContent', {
+    get() { return this._textContent; },
+    set(value) {
+      this._textContent = value;
+      if (value === '') this.innerHTML = '';
+    },
+  });
+  return element;
 }
 
 const appEl = makeEl('app');
@@ -40,12 +51,7 @@ domElements.set('toast', toastEl);
 globalThis.document = {
   getElementById: (id) => domElements.get(id) ?? null,
   querySelectorAll: () => [],
-  createElement: () => ({
-    style: {}, href: '', download: '', tagName: 'a',
-    click() {}, select() {}, value: '',
-    addEventListener() {},
-    appendChild() {},
-  }),
+  createElement: (tagName) => ({ ...makeEl(), tagName, href: '', download: '', click() {}, select() {} }),
   body: { appendChild() {}, removeChild() {} },
 };
 

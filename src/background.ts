@@ -1285,7 +1285,7 @@ function validateRpcUrl(url: string, field: string): string {
   // Reject private IP ranges that are not localhost.
   if (!isLocalhost) {
     const privateRangePattern =
-      /^(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+)$/;
+      /^(10\.\d+\.\d+\.\d+|127\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+)$/;
     if (privateRangePattern.test(hostname)) {
       throw new Error(`${field} must not point to a private IP address`);
     }
