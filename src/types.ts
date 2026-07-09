@@ -9,6 +9,13 @@ export interface StoredAccount {
   keystoreJson: string;
 }
 
+export interface PendingKeyRotation {
+  txHash: string;
+  pqAddress: string;
+  keystoreJson: string;
+  createdAt: number;
+}
+
 export interface ConnectedSitePermission {
   origin: string;
   accounts: string[];

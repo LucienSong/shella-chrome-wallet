@@ -41,6 +41,7 @@ const {
   getWalletState,
   getAccounts,
   addAccount,
+  replaceAccountKeystore,
   getNetwork,
   setNetwork,
   getTxQueue,
@@ -55,6 +56,9 @@ const {
   getConnectedSites,
   addConnectedSite,
   removeConnectedSite,
+  getPendingKeyRotations,
+  addPendingKeyRotation,
+  setPendingKeyRotations,
 } = await import('../dist/store.js');
 
 describe('store', () => {
@@ -81,6 +85,37 @@ describe('store', () => {
     const accounts = await getAccounts();
     assert.equal(accounts.length, 1);
     assert.equal(accounts[0].pqAddress, SHELL_ADDRESS_A);
+  });
+
+  test('replaceAccountKeystore updates an existing account only', async () => {
+    await addAccount({ pqAddress: `0x${'aa'.repeat(32)}`, keystoreJson: '{"old":true}' });
+    await replaceAccountKeystore(`0x${'aa'.repeat(32)}`, '{"new":true}');
+    const accounts = await getAccounts();
+    assert.equal(accounts.length, 1);
+    assert.equal(accounts[0].keystoreJson, '{"new":true}');
+
+    await assert.rejects(
+      () => replaceAccountKeystore(`0x${'bb'.repeat(32)}`, '{}'),
+      /Account not found/,
+    );
+  });
+
+  test('pending key rotations can be added, replaced, and cleared', async () => {
+    const rotation = {
+      txHash: `0x${'12'.repeat(32)}`,
+      pqAddress: `0x${'aa'.repeat(32)}`,
+      keystoreJson: '{"rotation":1}',
+      createdAt: 1,
+    };
+    await addPendingKeyRotation(rotation);
+    await addPendingKeyRotation({ ...rotation, keystoreJson: '{"rotation":2}', createdAt: 2 });
+    let pending = await getPendingKeyRotations();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].keystoreJson, '{"rotation":2}');
+
+    await setPendingKeyRotations([]);
+    pending = await getPendingKeyRotations();
+    assert.deepEqual(pending, []);
   });
 
   test('setNetwork persists and getNetwork retrieves', async () => {

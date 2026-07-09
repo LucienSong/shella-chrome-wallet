@@ -8,28 +8,36 @@
 import { MlDsa65Adapter, generateMlDsa65KeyPair } from 'shell-sdk/adapters';
 import { createShellProvider } from 'shell-sdk/provider';
 import { ShellSigner } from 'shell-sdk/signer';
-import { buildTransaction, buildTransferTransaction, hashTransaction } from 'shell-sdk/transactions';
-import type { ShellEncryptedKey } from 'shell-sdk/types';
+import { buildRotateKeyTransaction, buildTransaction, buildTransferTransaction, hashTransaction } from 'shell-sdk/transactions';
+import { createSessionAuth, finalizeSessionAuth } from 'shell-sdk/session';
+import type { SessionAuth, ShellEncryptedKey } from 'shell-sdk/types';
+import { deriveAccount, deriveSessionKey, generateMnemonic, mnemonicToSeed, validateHdMnemonic } from 'shell-sdk/hdwallet';
 import { defineChain, parseEther } from 'viem';
-import { createKeystore, decryptKeystore } from './crypto.js';
+import { createKeystore, decryptKeystore, decryptHdSeed, encryptHdSeed, encryptMnemonic, decryptMnemonic } from './crypto.js';
 import {
   KNOWN_NETWORKS,
   addAccount as addStoredAccount,
+  addPendingKeyRotation,
   addConnectedSite,
   clearAllData,
   clearSessionState,
   getAccounts,
   getAutoLockMinutes,
   getConnectedSites,
+  getHdStore,
   getLastActiveAddress,
+  getPendingKeyRotations,
   getNetwork,
   getTxQueue,
   getWalletState,
   initStore,
   removeConnectedSite,
+  replaceAccountKeystore,
   setAutoLockMinutes,
+  setHdStore,
   setLastActiveAddress,
   setNetwork,
+  setPendingKeyRotations,
   setSessionState,
   setTxQueue,
   upsertTxRecord,
@@ -64,6 +72,7 @@ const pendingApprovals = new Map<
 // allocating the same nonce before the first is committed to txQueue storage.
 // Maps normalised-lowercase address → highest nonce already allocated this session.
 const allocatedNonces = new Map<string, number>();
+let hdAccountReservation: Promise<void> = Promise.resolve();
 
 chrome.runtime.onInstalled.addListener(async () => {
   await initStore();
@@ -90,7 +99,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 // not from content scripts. Content scripts always have sender.tab set.
 const PRIVILEGED_MESSAGE_TYPES = new Set([
   'CREATE_WALLET', 'IMPORT_KEYSTORE', 'UNLOCK_WALLET', 'LOCK_WALLET', 'RESET_WALLET',
-  'EXPORT_KEYSTORE', 'SEND_TX', 'SIGN',
+  'EXPORT_KEYSTORE', 'SEND_TX', 'SIGN', 'AUTHORIZE_SESSION_KEY', 'ROTATE_KEY',
 ]);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -149,6 +158,26 @@ export async function handleMessage(msg: { type: string; [key: string]: unknown 
   switch (msg.type) {
     case 'CREATE_WALLET':
       return createWallet(requirePassword(msg.password));
+    case 'CREATE_HD_WALLET':
+      return createHdWallet(requireString(msg.mnemonic, 'mnemonic'), requirePassword(msg.password));
+    case 'RESTORE_HD_WALLET':
+      return restoreHdWallet(requireString(msg.mnemonic, 'mnemonic'), requirePassword(msg.password));
+    case 'GENERATE_MNEMONIC':
+      return { mnemonic: generateMnemonic(256) };
+    case 'REVEAL_MNEMONIC':
+      return revealMnemonic(requirePassword(msg.password));
+    case 'AUTHORIZE_SESSION_KEY':
+      return authorizeSessionKey({
+        password: requirePassword(msg.password),
+        sessionIndex: optionalNumber(msg.sessionIndex) ?? 0,
+        rootAccountIndex: optionalNumber(msg.rootAccountIndex) ?? 0,
+        expiryBlock: requireNumber(msg.expiryBlock, 'expiryBlock'),
+        valueCap: requireBigIntQuantity(msg.valueCap, 'valueCap'),
+        target: optionalNullableString(msg.target),
+        txSigningHash: optionalString(msg.txSigningHash),
+      });
+    case 'ROTATE_KEY':
+      return rotateActiveKey(requirePassword(msg.password));
     case 'IMPORT_KEYSTORE':
       return importKeystore(requireString(msg.keystoreJson, 'keystoreJson'), requirePassword(msg.password));
     case 'UNLOCK_WALLET':
@@ -279,20 +308,179 @@ async function importKeystore(
 }
 
 async function createAdditionalAccount(password: string): Promise<{ pqAddress: string }> {
+  // If an HD wallet exists, derive the next HD account from the seed.
+  const hdStore = await getHdStore();
+  if (hdStore) {
+    const { hdStore: reservedHdStore, accountIndex } = await reserveNextHdAccountIndex();
+
+    const seed = await decryptHdSeed(reservedHdStore.seedKeystoreJson, password);
+    const account = deriveAccount(seed, 'ml-dsa-65', accountIndex, 0, 0);
+    seed.fill(0);
+
+    const keystore = await createKeystore(account.secretKey, account.publicKey, password, account.address, 'mldsa65');
+    await addStoredAccount({ pqAddress: account.address, keystoreJson: JSON.stringify(keystore) });
+    account.secretKey.fill(0);
+
+    return { pqAddress: account.address };
+  }
+
+  // Fallback: generate a new random keypair (non-HD wallet).
   const { publicKey: pk, secretKey: sk } = generateMlDsa65KeyPair();
-  let signer: ShellSigner | null = null;
+  const adapter = MlDsa65Adapter.fromKeyPair(pk, sk.slice());
+  const pqAddress = new ShellSigner('MlDsa65', adapter).getAddress();
+
+  const keystore = await createKeystore(sk, pk, password, pqAddress, 'mldsa65');
+  await addStoredAccount({ pqAddress, keystoreJson: JSON.stringify(keystore) });
+  sk.fill(0);
+
+  return { pqAddress };
+}
+
+async function reserveNextHdAccountIndex(): Promise<{
+  hdStore: NonNullable<Awaited<ReturnType<typeof getHdStore>>>;
+  accountIndex: number;
+}> {
+  const previous = hdAccountReservation;
+  let release!: () => void;
+  hdAccountReservation = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  await previous;
   try {
-    const adapter = MlDsa65Adapter.fromKeyPair(pk, sk);
-    signer = new ShellSigner('MlDsa65', adapter);
-    const pqAddress = signer.getAddress();
-
-    const keystore = await createKeystore(sk, pk, password, pqAddress, 'mldsa65');
-    await addStoredAccount({ pqAddress, keystoreJson: JSON.stringify(keystore) });
-
-    return { pqAddress };
+    const hdStore = await getHdStore();
+    if (!hdStore) throw new Error('No HD wallet found');
+    const accountIndex = hdStore.accountCount;
+    await setHdStore({ ...hdStore, accountCount: accountIndex + 1 });
+    return { hdStore, accountIndex };
   } finally {
-    signer?.dispose();
-    sk.fill(0);
+    release();
+  }
+}
+
+/**
+ * Create a new HD wallet from a BIP-39 mnemonic (generated or user-provided).
+ * Derives ML-DSA-65 account 0 at path m/9000'/8888'/1'/0'/0'/0' (all hardened),
+ * stores the encrypted seed and mnemonic, and unlocks the wallet.
+ */
+async function createHdWallet(mnemonic: string, password: string): Promise<{ pqAddress: string }> {
+  if (!validateHdMnemonic(mnemonic)) throw new Error('Invalid BIP-39 mnemonic');
+
+  const seed = mnemonicToSeed(mnemonic);
+  const account = deriveAccount(seed, 'ml-dsa-65', 0, 0, 0);
+
+  const seedKeystore = await encryptHdSeed(seed, password, account.address);
+  const mnemonicKeystore = await encryptMnemonic(mnemonic, password);
+  seed.fill(0);
+
+  await setHdStore({
+    seedKeystoreJson: JSON.stringify(seedKeystore),
+    mnemonicKeystoreJson: JSON.stringify(mnemonicKeystore),
+    accountCount: 1,
+  });
+
+  const keystore = await createKeystore(account.secretKey, account.publicKey, password, account.address, 'mldsa65');
+  await addStoredAccount({ pqAddress: account.address, keystoreJson: JSON.stringify(keystore) });
+
+  const adapter = MlDsa65Adapter.fromKeyPair(account.publicKey, account.secretKey.slice());
+  const signer = new ShellSigner('MlDsa65', adapter);
+  account.secretKey.fill(0);
+
+  replaceCurrentSigner(signer);
+  await setSessionState({ unlockedPqAddress: account.address, unlockedAt: Date.now() });
+  await setLastActiveAddress(account.address);
+  await scheduleAutoLock();
+
+  return { pqAddress: account.address };
+}
+
+/** Restore an HD wallet from an existing BIP-39 mnemonic (same logic as create). */
+async function restoreHdWallet(mnemonic: string, password: string): Promise<{ pqAddress: string }> {
+  return createHdWallet(mnemonic, password);
+}
+
+/**
+ * Reveal the recovery mnemonic after password verification.
+ * The mnemonic is only available if the wallet was created as an HD wallet.
+ */
+async function revealMnemonic(password: string): Promise<{ mnemonic: string }> {
+  const hdStore = await getHdStore();
+  if (!hdStore) throw new Error('No HD wallet found. Recovery phrase is only available for HD wallets.');
+
+  const mnemonic = await decryptMnemonic(hdStore.mnemonicKeystoreJson, password);
+  return { mnemonic };
+}
+
+async function authorizeSessionKey(input: {
+  password: string;
+  sessionIndex: number;
+  rootAccountIndex: number;
+  expiryBlock: number;
+  valueCap: bigint;
+  target: string | null;
+  txSigningHash?: string;
+}): Promise<{
+  rootAddress: string;
+  sessionAddress: string;
+  sessionPath: string;
+  sessionAuth: SessionAuth;
+}> {
+  const hdStore = await getHdStore();
+  if (!hdStore) throw new Error('No HD wallet found. Session keys require an HD seed.');
+  if (!Number.isInteger(input.sessionIndex) || input.sessionIndex < 0) {
+    throw new Error('sessionIndex must be a non-negative integer');
+  }
+  if (!Number.isInteger(input.rootAccountIndex) || input.rootAccountIndex < 0) {
+    throw new Error('rootAccountIndex must be a non-negative integer');
+  }
+  if (!Number.isInteger(input.expiryBlock) || input.expiryBlock <= 0) {
+    throw new Error('expiryBlock must be a positive integer');
+  }
+  if (input.target !== null) {
+    normalizeRecipient(input.target);
+  }
+
+  const network = await getNetwork();
+  const seed = await decryptHdSeed(hdStore.seedKeystoreJson, input.password);
+  const rootAccount = deriveAccount(seed, 'ml-dsa-65', input.rootAccountIndex, 0, 0);
+  const sessionAccount = deriveSessionKey(seed, 'ml-dsa-65', input.sessionIndex);
+  seed.fill(0);
+
+  const rootAdapter = MlDsa65Adapter.fromKeyPair(rootAccount.publicKey, rootAccount.secretKey.slice());
+  const sessionAdapter = MlDsa65Adapter.fromKeyPair(sessionAccount.publicKey, sessionAccount.secretKey.slice());
+
+  try {
+    const activeAccount = await getActiveAccount();
+    if (activeAccount && activeAccount.pqAddress !== rootAccount.address) {
+      throw new Error('Active account does not match the requested rootAccountIndex');
+    }
+
+    let sessionAuth = await createSessionAuth(rootAdapter, sessionAccount.publicKey, sessionAccount.algoId, {
+      chainId: BigInt(network.chainId),
+      expiryBlock: input.expiryBlock,
+      valueCap: input.valueCap,
+      target: input.target,
+    });
+
+    if (input.txSigningHash) {
+      sessionAuth = await finalizeSessionAuth(
+        sessionAuth,
+        sessionAdapter,
+        parseSigningHash(input.txSigningHash),
+      );
+    }
+
+    return {
+      rootAddress: rootAccount.address,
+      sessionAddress: sessionAccount.address,
+      sessionPath: sessionAccount.path,
+      sessionAuth,
+    };
+  } finally {
+    rootAdapter.dispose();
+    sessionAdapter.dispose();
+    rootAccount.secretKey.fill(0);
+    sessionAccount.secretKey.fill(0);
   }
 }
 
@@ -463,6 +651,56 @@ async function sendTransaction(params: SendTransactionParams): Promise<{ txHash:
   return { txHash };
 }
 
+async function rotateActiveKey(password: string): Promise<{ txHash: string; pqAddress: string }> {
+  if (!currentSigner) throw new Error('Wallet is locked');
+
+  const network = await getNetwork();
+  const provider = buildProvider(network);
+  const from = currentSigner.getAddress();
+  const { publicKey, secretKey } = generateMlDsa65KeyPair();
+
+  try {
+    const onChainNonce = await provider.client.getTransactionCount({ address: asPqAddress(from, 'getTransactionCount') });
+    const nonce = await allocateNextNonce(from, onChainNonce);
+    const tx = buildRotateKeyTransaction({
+      chainId: network.chainId,
+      nonce,
+      publicKey,
+      algorithmId: 1,
+    });
+    const signed = await currentSigner.buildSignedTransaction({
+      tx,
+      txHash: hashTransaction(tx),
+      includePublicKey: nonce === 0,
+    });
+    const txHash = await provider.sendTransaction(signed);
+    const keystore = await createKeystore(secretKey, publicKey, password, from, 'mldsa65');
+    await addPendingKeyRotation({
+      txHash,
+      pqAddress: from,
+      keystoreJson: JSON.stringify(keystore),
+      createdAt: Date.now(),
+    });
+    await upsertTxRecord({
+      txHash,
+      from,
+      to: tx.to ?? from,
+      value: '0',
+      data: tx.data,
+      nonce,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      status: 'pending',
+      source: 'local',
+      shellType: 'keyRotation',
+    });
+    await scheduleTxPolling();
+    return { txHash, pqAddress: from };
+  } finally {
+    secretKey.fill(0);
+  }
+}
+
 async function getTxHistory(
   address: string,
   page: number,
@@ -521,8 +759,33 @@ async function pollPendingTransactions(): Promise<void> {
 
   if (changed) {
     await setTxQueue(next);
+    await applyPendingKeyRotations(next);
   }
   await scheduleTxPolling();
+}
+
+async function applyPendingKeyRotations(txQueue: WalletTxRecord[]): Promise<void> {
+  const pending = await getPendingKeyRotations();
+  if (pending.length === 0) return;
+
+  const remaining = [];
+  let activated = false;
+  for (const rotation of pending) {
+    const tx = txQueue.find((item) => item.txHash.toLowerCase() === rotation.txHash.toLowerCase());
+    if (!tx || tx.status === 'pending') {
+      remaining.push(rotation);
+      continue;
+    }
+    if (tx.status === 'confirmed') {
+      await replaceAccountKeystore(rotation.pqAddress, rotation.keystoreJson);
+      activated = true;
+    }
+  }
+
+  await setPendingKeyRotations(remaining);
+  if (activated) {
+    await lockWallet();
+  }
 }
 
 async function allocateNextNonce(from: string, onChainNonce: number): Promise<number> {
@@ -661,7 +924,11 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
         throw new Error('wallet_switchEthereumChain requires a chain payload');
       }
       const chainIdHex = requireString((chainPayload as Record<string, unknown>).chainId, 'chainId');
-      const chainId = Number(BigInt(chainIdHex));
+      const chainIdBig = BigInt(chainIdHex);
+      if (chainIdBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error(`chainId ${chainIdHex} exceeds safe integer range`);
+      }
+      const chainId = Number(chainIdBig);
       const nextNetwork = findKnownNetwork(chainId);
       if (!nextNetwork) {
         throw new Error('Unknown chain. Use wallet_addEthereumChain first.');
@@ -785,8 +1052,9 @@ function buildConnectedSite(
 }
 
 async function getConnectedPermission(origin: string): Promise<ConnectedSitePermission | null> {
+  const normalized = normalizeOrigin(origin);
   const sites = await getConnectedSites();
-  return sites.find((site) => site.origin === origin) ?? null;
+  return sites.find((site) => site.origin === normalized) ?? null;
 }
 
 // WALLET-L1: use cryptographically secure RNG for all request/approval IDs.
@@ -1050,6 +1318,11 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value : undefined;
 }
 
+function optionalNullableString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return requireString(value, 'target');
+}
+
 function requireNumber(value: unknown, field: string): number {
   if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) {
     throw new Error(`${field} must be a valid number`);
@@ -1069,6 +1342,40 @@ function formatEther(wei: bigint): string {
 function parseEtherValue(value: string): bigint {
   if (value.startsWith('0x')) return BigInt(value);
   return parseEther(value as `${number}`);
+}
+
+function requireBigIntQuantity(value: unknown, field: string): bigint {
+  if (typeof value === 'bigint') {
+    if (value < 0n) throw new Error(`${field} must be non-negative`);
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`${field} must be a non-negative safe integer`);
+    }
+    return BigInt(value);
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    try {
+      const parsed = BigInt(value);
+      if (parsed < 0n) throw new Error();
+      return parsed;
+    } catch {
+      throw new Error(`${field} must be a non-negative decimal or hex quantity`);
+    }
+  }
+  throw new Error(`${field} is required`);
+}
+
+function parseSigningHash(value: string): Uint8Array {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    throw new Error('txSigningHash must be 0x + 64 hex characters');
+  }
+  const out = new Uint8Array(32);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(value.slice(2 + i * 2, 4 + i * 2), 16);
+  }
+  return out;
 }
 
 /**

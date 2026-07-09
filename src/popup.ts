@@ -13,6 +13,7 @@ import type {
   WalletSnapshot,
   WalletTxRecord,
 } from './types.js';
+import { KNOWN_NETWORKS } from './store.js';
 
 type View =
   | 'loading'
@@ -20,6 +21,15 @@ type View =
   | 'create-password'
   | 'create-generating'
   | 'create-success'
+  | 'hd-show-phrase'
+  | 'hd-confirm-phrase'
+  | 'hd-create-password'
+  | 'hd-creating'
+  | 'hd-restore-phrase'
+  | 'hd-restore-password'
+  | 'hd-restoring'
+  | 'reveal-phrase'
+  | 'reveal-phrase-confirm'
   | 'import-file'
   | 'import-password'
   | 'locked'
@@ -34,6 +44,7 @@ type View =
   | 'add-account'
   | 'add-account-generating'
   | 'switch-account'
+  | 'advanced-pq'
   | 'approval-request';
 
 interface AppState {
@@ -57,12 +68,24 @@ interface AppState {
   switchTargetAddress: string;
   // Temp fields for flows
   pendingKeystoreJson: string;
+  pendingMnemonic: string;
+  revealedMnemonic: string;
   sendTo: string;
   sendValue: string;
   sendData: string;
   sendGasLimit: string;
   sendMaxFeePerGas: string;
   sendMaxPriorityFeePerGas: string;
+  sessionPassword: string;
+  sessionIndex: string;
+  sessionRootAccountIndex: string;
+  sessionExpiryBlock: string;
+  sessionValueCap: string;
+  sessionTarget: string;
+  sessionTxSigningHash: string;
+  sessionAuthJson: string;
+  rotatePassword: string;
+  pendingRotationTxHash: string;
   approvalRequest: ApprovalRequest | null;
 }
 
@@ -82,12 +105,24 @@ const state: AppState = {
   toast: '',
   nodeInfo: null,
   pendingKeystoreJson: '',
+  pendingMnemonic: '',
+  revealedMnemonic: '',
   sendTo: '',
   sendValue: '',
   sendData: '0x',
   sendGasLimit: '',
   sendMaxFeePerGas: '',
   sendMaxPriorityFeePerGas: '',
+  sessionPassword: '',
+  sessionIndex: '0',
+  sessionRootAccountIndex: '0',
+  sessionExpiryBlock: '',
+  sessionValueCap: '0',
+  sessionTarget: '',
+  sessionTxSigningHash: '',
+  sessionAuthJson: '',
+  rotatePassword: '',
+  pendingRotationTxHash: '',
   approvalRequest: null,
   accounts: [],
   selectedTxHash: '',
@@ -105,7 +140,9 @@ function send<T = unknown>(type: string, data: Record<string, unknown> = {}): Pr
 }
 
 function app(): HTMLElement {
-  return document.getElementById('app')!;
+  const el = document.getElementById('app');
+  if (!el) throw new Error('#app element not found — popup DOM failed to load');
+  return el;
 }
 
 function showToast(msg: string, isError = false): void {
@@ -172,6 +209,15 @@ function render(): void {
     'create-password': renderCreatePassword,
     'create-generating': renderGenerating,
     'create-success': renderCreateSuccess,
+    'hd-show-phrase': renderHdShowPhrase,
+    'hd-confirm-phrase': renderHdConfirmPhrase,
+    'hd-create-password': renderHdCreatePassword,
+    'hd-creating': renderHdCreating,
+    'hd-restore-phrase': renderHdRestorePhrase,
+    'hd-restore-password': renderHdRestorePassword,
+    'hd-restoring': renderHdRestoring,
+    'reveal-phrase': renderRevealPhraseConfirm,
+    'reveal-phrase-confirm': renderRevealPhrase,
     'import-file': renderImportFile,
     'import-password': renderImportPassword,
     locked: renderLocked,
@@ -186,6 +232,7 @@ function render(): void {
     'add-account': renderAddAccount,
     'add-account-generating': renderAddAccountGenerating,
     'switch-account': renderSwitchAccount,
+    'advanced-pq': renderAdvancedPq,
     'approval-request': renderApprovalRequest,
   };
   
@@ -217,8 +264,9 @@ function renderWelcome(): string {
       <div class="logo">🔐</div>
       <h1>Shella Wallet</h1>
       <p class="subtitle">Post-quantum wallet for Shell Chain</p>
-      <button id="btn-create" class="btn-primary">Create New Wallet</button>
-      <button id="btn-import" class="btn-secondary">Import Keystore</button>
+      <button id="btn-create-hd" class="btn-primary">Create New Wallet</button>
+      <button id="btn-restore-hd" class="btn-secondary">Import Recovery Phrase</button>
+      <button id="btn-import" class="btn-secondary" style="margin-top:4px">Import Keystore</button>
     </div>
   `;
 }
@@ -288,6 +336,147 @@ function renderCreateSuccess(): string {
       </div>
       <button id="btn-export-ks" class="btn-secondary">Export Keystore</button>
       <button id="btn-goto-wallet" class="btn-primary">Open Wallet</button>
+    </div>
+  `;
+}
+
+function renderHdShowPhrase(): string {
+  const words = state.pendingMnemonic.split(' ');
+  const grid = words.map((word, i) => `
+    <div class="phrase-word">
+      <span class="word-num">${i + 1}</span>
+      <span class="word-val">${escapeHtml(word)}</span>
+    </div>
+  `).join('');
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Recovery Phrase</h2>
+      <p class="hint">⚠️ Write down these 24 words in order. Anyone with these words can access your wallet.</p>
+      <div class="phrase-grid">${grid}</div>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-hd-phrase-next" class="btn-primary" style="margin-top:16px">I've Written It Down</button>
+    </div>
+  `;
+}
+
+function renderHdConfirmPhrase(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Confirm Backup</h2>
+      <p class="hint">Confirm you have securely backed up your recovery phrase. You will not be able to view it again.</p>
+      <label class="checkbox-label">
+        <input type="checkbox" id="hd-confirm-check" />
+        I have securely backed up my 24-word recovery phrase.
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-hd-confirm-next" class="btn-primary" style="margin-top:16px">Continue</button>
+    </div>
+  `;
+}
+
+function renderHdCreatePassword(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Set Password</h2>
+      <p class="hint">Protects your wallet on this device. Minimum 8 characters.</p>
+      <label>Password
+        <input type="password" id="hd-pwd1" placeholder="Enter password" autocomplete="new-password" />
+      </label>
+      <label>Confirm Password
+        <input type="password" id="hd-pwd2" placeholder="Confirm password" autocomplete="new-password" />
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-hd-create-confirm" class="btn-primary">Create Wallet</button>
+    </div>
+  `;
+}
+
+function renderHdCreating(): string {
+  return `
+    <div class="center">
+      <div class="spinner"></div>
+      <h2>Creating HD Wallet</h2>
+      <p class="hint">Deriving ML-DSA-65 keys from recovery phrase…</p>
+    </div>
+  `;
+}
+
+function renderHdRestorePhrase(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Import Recovery Phrase</h2>
+      <p class="hint">Enter your 12 or 24-word BIP-39 recovery phrase, separated by spaces.</p>
+      <label>Recovery Phrase
+        <textarea id="hd-restore-phrase-input" rows="4" placeholder="word1 word2 word3 …" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-hd-restore-phrase-next" class="btn-primary">Continue</button>
+    </div>
+  `;
+}
+
+function renderHdRestorePassword(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Set Password</h2>
+      <p class="hint">Protects your restored wallet on this device. Minimum 8 characters.</p>
+      <label>Password
+        <input type="password" id="hd-restore-pwd1" placeholder="Enter password" autocomplete="new-password" />
+      </label>
+      <label>Confirm Password
+        <input type="password" id="hd-restore-pwd2" placeholder="Confirm password" autocomplete="new-password" />
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-hd-restore-confirm" class="btn-primary">Restore Wallet</button>
+    </div>
+  `;
+}
+
+function renderHdRestoring(): string {
+  return `
+    <div class="center">
+      <div class="spinner"></div>
+      <h2>Restoring Wallet</h2>
+      <p class="hint">Deriving keys from recovery phrase…</p>
+    </div>
+  `;
+}
+
+function renderRevealPhraseConfirm(): string {
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Reveal Recovery Phrase</h2>
+      <p class="hint">⚠️ Make sure nobody is watching your screen. Enter your password to reveal the recovery phrase.</p>
+      <label>Password
+        <input type="password" id="reveal-phrase-pwd" placeholder="Enter password" autocomplete="current-password" autofocus />
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-reveal-phrase-confirm" class="btn-primary">Reveal Phrase</button>
+    </div>
+  `;
+}
+
+function renderRevealPhrase(): string {
+  const words = state.revealedMnemonic.split(' ');
+  const grid = words.map((word, i) => `
+    <div class="phrase-word">
+      <span class="word-num">${i + 1}</span>
+      <span class="word-val">${escapeHtml(word)}</span>
+    </div>
+  `).join('');
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Recovery Phrase</h2>
+      <p class="hint">⚠️ Keep this phrase secret. Anyone with these words controls your wallet.</p>
+      <div class="phrase-grid">${grid}</div>
+      <button id="btn-back-from-phrase" class="btn-secondary" style="margin-top:16px">Done</button>
     </div>
   `;
 }
@@ -365,6 +554,15 @@ function renderWallet(): string {
        </span>`
     : '';
 
+  // Node info panel — shown when shell_getNodeInfo succeeds.
+  const nodeInfoHtml = state.nodeInfo
+    ? `<div class="node-info-card">
+        <span class="node-info-item" title="Node version">📦 ${state.nodeInfo.version}</span>
+        <span class="node-info-item" title="Block height">🧱 #${state.nodeInfo.block_height.toLocaleString()}</span>
+        <span class="node-info-item" title="Peer count">🔗 ${state.nodeInfo.peer_count} peer${state.nodeInfo.peer_count === 1 ? '' : 's'}</span>
+      </div>`
+    : '';
+
   const pendingHtml = pendingTxs.length > 0
     ? `
       <div class="pending-card">
@@ -394,9 +592,10 @@ function renderWallet(): string {
     <div class="wallet-view">
       <div class="wallet-header">
         <select id="quick-net-select" class="quick-net-select" title="Switch network">
-          <option value="devnet" ${state.network.name === 'Shell Devnet' ? 'selected' : ''}>⬡ Devnet</option>
-          <option value="testnet" ${state.network.name === 'Shell Testnet' ? 'selected' : ''}>⬡ Testnet</option>
-          <option value="mainnet" ${state.network.name === 'Shell Mainnet' ? 'selected' : ''}>⬡ Mainnet</option>
+          <option value="devnet" ${state.network.name === KNOWN_NETWORKS.devnet.name ? 'selected' : ''}>⬡ Devnet</option>
+          <option value="localdev" ${state.network.name === KNOWN_NETWORKS.localdev.name ? 'selected' : ''}>⬡ Testnet (local)</option>
+          <option value="testnet" ${state.network.name === KNOWN_NETWORKS.testnet.name ? 'selected' : ''}>⬡ Testnet</option>
+          <option value="mainnet" ${state.network.name === KNOWN_NETWORKS.mainnet.name ? 'selected' : ''}>⬡ Mainnet</option>
         </select>
         ${storageProfileHtml}
         <button class="btn-icon" id="btn-accounts" title="Accounts (${state.accounts.length})">👤</button>
@@ -417,6 +616,7 @@ function renderWallet(): string {
         <span>${state.detectedChainId == null ? 'RPC unavailable' : `RPC chain: ${escapeHtml(state.detectedChainId)}`}</span>
         <span>${state.nonce == null ? 'Nonce unavailable' : `Nonce: ${escapeHtml(state.nonce)}`}</span>
       </div>
+      ${nodeInfoHtml}
       ${networkWarning ? `<div class="status-card status-card-warning">${escapeHtml(networkWarning)}</div>` : ''}
       <div class="action-row">
         <button class="btn-action" id="btn-send">
@@ -651,9 +851,10 @@ function renderSettings(): string {
 
       <div class="section-title">Network</div>
       <select id="network-select" class="select-input">
-        <option value="devnet" ${state.network.name === 'Shell Devnet' ? 'selected' : ''}>Shell Devnet (424242)</option>
-        <option value="testnet" ${state.network.name === 'Shell Testnet' ? 'selected' : ''}>Shell Testnet (10)</option>
-        <option value="mainnet" ${state.network.name === 'Shell Mainnet' ? 'selected' : ''}>Shell Mainnet (100000)</option>
+        <option value="devnet" ${state.network.name === KNOWN_NETWORKS.devnet.name ? 'selected' : ''}>Shell Devnet (${KNOWN_NETWORKS.devnet.chainId})</option>
+        <option value="localdev" ${state.network.name === KNOWN_NETWORKS.localdev.name ? 'selected' : ''}>Shell Testnet — local (${KNOWN_NETWORKS.localdev.chainId}, localhost)</option>
+        <option value="testnet" ${state.network.name === KNOWN_NETWORKS.testnet.name ? 'selected' : ''}>Shell Testnet (${KNOWN_NETWORKS.testnet.chainId})</option>
+        <option value="mainnet" ${state.network.name === KNOWN_NETWORKS.mainnet.name ? 'selected' : ''}>Shell Mainnet (${KNOWN_NETWORKS.mainnet.chainId})</option>
         <option value="custom">Custom RPC…</option>
       </select>
       <div id="custom-rpc-section" style="display:none">
@@ -675,10 +876,65 @@ function renderSettings(): string {
       </label>
       <button id="btn-save-auto-lock" class="btn-secondary">Save Auto-lock</button>
       <button id="btn-export-ks" class="btn-secondary">Export Keystore</button>
+      <button id="btn-reveal-phrase" class="btn-secondary">Reveal Recovery Phrase</button>
+      <button id="btn-advanced-pq" class="btn-secondary">Advanced PQ</button>
       <button id="btn-reset" class="btn-danger">Reset Wallet</button>
 
       <div class="section-title" style="margin-top:16px">Connected dApps</div>
       <div class="site-list">${connectedSitesHtml}</div>
+    </div>
+  `;
+}
+
+function renderAdvancedPq(): string {
+  const resultHtml = state.sessionAuthJson
+    ? `
+      <div class="section-title" style="margin-top:16px">Session Authorization</div>
+      <textarea id="session-auth-json" rows="10" readonly>${escapeHtml(state.sessionAuthJson)}</textarea>
+      <button id="btn-copy-session-auth" class="btn-secondary">Copy Session Auth</button>
+    `
+    : '';
+  return `
+    <div class="view-form">
+      <button class="btn-back" id="btn-back">← Back</button>
+      <h2>Advanced PQ</h2>
+      <p class="hint">Authorize a deterministic HD session key for bounded AA/paymaster workflows.</p>
+
+      <div class="section-title">Session Key</div>
+      <label>Password
+        <input type="password" id="session-password" placeholder="Wallet password" autocomplete="current-password" value="${escapeHtml(state.sessionPassword)}" />
+      </label>
+      <label>Root Account Index
+        <input type="number" id="session-root-index" min="0" step="1" value="${escapeHtml(state.sessionRootAccountIndex)}" />
+      </label>
+      <label>Session Index
+        <input type="number" id="session-index" min="0" step="1" value="${escapeHtml(state.sessionIndex)}" />
+      </label>
+      <label>Expiry Block
+        <input type="number" id="session-expiry" min="1" step="1" placeholder="e.g. 430000" value="${escapeHtml(state.sessionExpiryBlock)}" />
+      </label>
+      <label>Value Cap (wei)
+        <input type="text" id="session-value-cap" inputmode="numeric" placeholder="0" value="${escapeHtml(state.sessionValueCap)}" />
+      </label>
+      <label>Target Address (optional)
+        <input type="text" id="session-target" placeholder="0x… or empty" value="${escapeHtml(state.sessionTarget)}" />
+      </label>
+      <label>Transaction Signing Hash (optional)
+        <input type="text" id="session-tx-hash" placeholder="0x + 32 bytes, optional" value="${escapeHtml(state.sessionTxSigningHash)}" />
+      </label>
+      ${state.error ? `<div class="error">${state.error}</div>` : ''}
+      <button id="btn-authorize-session" class="btn-primary">Authorize Session Key</button>
+      ${resultHtml}
+
+      <div class="section-title" style="margin-top:16px">Key Rotation</div>
+      <p class="hint">Submit an AccountManager key-rotation transaction. The wallet activates the new local keystore only after the transaction confirms.</p>
+      <label>Password
+        <input type="password" id="rotate-password" placeholder="Wallet password" autocomplete="current-password" value="${escapeHtml(state.rotatePassword)}" />
+      </label>
+      <button id="btn-rotate-key" class="btn-secondary">Rotate Active Key</button>
+      ${state.pendingRotationTxHash
+        ? `<div class="status-card status-card-warning">Pending rotation: <span class="monospace">${truncate(state.pendingRotationTxHash, 10, 8)}</span></div>`
+        : ''}
     </div>
   `;
 }
@@ -808,6 +1064,155 @@ function attachHandlers(): void {
     render();
   });
 
+  on('btn-create-hd', 'click', async () => {
+    state.error = '';
+    state.view = 'create-generating';
+    render();
+    try {
+      const res = await send<{ mnemonic: string }>('GENERATE_MNEMONIC');
+      state.pendingMnemonic = res.mnemonic;
+      state.view = 'hd-show-phrase';
+      render();
+    } catch (err) {
+      state.error = (err as Error).message;
+      state.view = 'welcome';
+      render();
+    }
+  });
+
+  on('btn-restore-hd', 'click', () => {
+    state.error = '';
+    state.pendingMnemonic = '';
+    state.view = 'hd-restore-phrase';
+    render();
+  });
+
+  on('btn-hd-phrase-next', 'click', () => {
+    state.error = '';
+    state.view = 'hd-confirm-phrase';
+    render();
+  });
+
+  on('btn-hd-confirm-next', 'click', () => {
+    const checked = (document.getElementById('hd-confirm-check') as HTMLInputElement)?.checked;
+    if (!checked) {
+      state.error = 'Please confirm you have backed up your recovery phrase.';
+      render();
+      return;
+    }
+    state.error = '';
+    state.view = 'hd-create-password';
+    render();
+  });
+
+  on('btn-hd-create-confirm', 'click', async () => {
+    const pwd1 = (document.getElementById('hd-pwd1') as HTMLInputElement)?.value;
+    const pwd2 = (document.getElementById('hd-pwd2') as HTMLInputElement)?.value;
+    if (!pwd1 || pwd1.length < 8) {
+      state.error = 'Password must be at least 8 characters';
+      render();
+      return;
+    }
+    if (pwd1 !== pwd2) {
+      state.error = 'Passwords do not match';
+      render();
+      return;
+    }
+    state.error = '';
+    state.view = 'hd-creating';
+    render();
+    try {
+      const res = await send<{ pqAddress: string }>('CREATE_HD_WALLET', {
+        mnemonic: state.pendingMnemonic,
+        password: pwd1,
+      });
+      state.pendingMnemonic = '';
+      state.pqAddress = res.pqAddress;
+      state.view = 'create-success';
+      render();
+    } catch (err) {
+      state.error = (err as Error).message;
+      state.view = 'hd-create-password';
+      render();
+    }
+  });
+
+  on('btn-hd-restore-phrase-next', 'click', () => {
+    const phrase = ((document.getElementById('hd-restore-phrase-input') as HTMLTextAreaElement)?.value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const wordCount = phrase.split(' ').length;
+    if (wordCount !== 12 && wordCount !== 24) {
+      state.error = 'Recovery phrase must be 12 or 24 words.';
+      render();
+      return;
+    }
+    state.error = '';
+    state.pendingMnemonic = phrase;
+    state.view = 'hd-restore-password';
+    render();
+  });
+
+  on('btn-hd-restore-confirm', 'click', async () => {
+    const pwd1 = (document.getElementById('hd-restore-pwd1') as HTMLInputElement)?.value;
+    const pwd2 = (document.getElementById('hd-restore-pwd2') as HTMLInputElement)?.value;
+    if (!pwd1 || pwd1.length < 8) {
+      state.error = 'Password must be at least 8 characters';
+      render();
+      return;
+    }
+    if (pwd1 !== pwd2) {
+      state.error = 'Passwords do not match';
+      render();
+      return;
+    }
+    state.error = '';
+    state.view = 'hd-restoring';
+    render();
+    try {
+      const res = await send<{ pqAddress: string }>('RESTORE_HD_WALLET', {
+        mnemonic: state.pendingMnemonic,
+        password: pwd1,
+      });
+      state.pendingMnemonic = '';
+      state.pqAddress = res.pqAddress;
+      await refreshWalletData();
+      state.view = 'wallet';
+      render();
+      showToast('Wallet restored successfully');
+    } catch (err) {
+      state.error = (err as Error).message;
+      state.view = 'hd-restore-password';
+      render();
+    }
+  });
+
+  on('btn-reveal-phrase', 'click', () => {
+    state.error = '';
+    state.revealedMnemonic = '';
+    state.view = 'reveal-phrase';
+    render();
+  });
+
+  on('btn-reveal-phrase-confirm', 'click', async () => {
+    const pwd = (document.getElementById('reveal-phrase-pwd') as HTMLInputElement)?.value;
+    if (!pwd) return;
+    state.error = '';
+    try {
+      const res = await send<{ mnemonic: string }>('REVEAL_MNEMONIC', { password: pwd });
+      state.revealedMnemonic = res.mnemonic;
+      state.view = 'reveal-phrase-confirm';
+      render();
+    } catch (err) {
+      state.error = (err as Error).message;
+      render();
+    }
+  });
+
+  on('btn-back-from-phrase', 'click', () => {
+    state.revealedMnemonic = '';
+    state.view = 'settings';
+    render();
+  });
+
   on('btn-import', 'click', () => {
     state.error = '';
     state.view = 'import-file';
@@ -818,6 +1223,12 @@ function attachHandlers(): void {
     state.error = '';
     const backMap: Partial<Record<View, View>> = {
       'create-password': 'welcome',
+      'hd-show-phrase': 'welcome',
+      'hd-confirm-phrase': 'hd-show-phrase',
+      'hd-create-password': 'hd-confirm-phrase',
+      'hd-restore-phrase': 'welcome',
+      'hd-restore-password': 'hd-restore-phrase',
+      'reveal-phrase': 'settings',
       'import-file': 'welcome',
       'import-password': 'import-file',
       send: 'wallet',
@@ -827,6 +1238,7 @@ function attachHandlers(): void {
       accounts: 'wallet',
       'add-account': 'accounts',
       'switch-account': 'accounts',
+      'advanced-pq': 'settings',
     };
     state.view = backMap[state.view] ?? 'wallet';
     render();
@@ -954,6 +1366,12 @@ function attachHandlers(): void {
     render();
   });
 
+  on('btn-advanced-pq', 'click', () => {
+    state.error = '';
+    state.view = 'advanced-pq';
+    render();
+  });
+
   on('btn-accounts', 'click', () => {
     state.error = '';
     state.view = 'accounts';
@@ -1052,12 +1470,7 @@ function attachHandlers(): void {
   if (quickNetSelect) {
     quickNetSelect.addEventListener('change', async () => {
       const val = quickNetSelect.value;
-      const quickNetworks: Record<string, { name: string; chainId: number; rpcUrl: string }> = {
-        devnet: { name: 'Shell Devnet', chainId: 424242, rpcUrl: 'http://127.0.0.1:8545' },
-        testnet: { name: 'Shell Testnet', chainId: 10, rpcUrl: 'https://rpc.testnet.shell.network' },
-        mainnet: { name: 'Shell Mainnet', chainId: 100000, rpcUrl: 'https://rpc.mainnet.shell.network' },
-      };
-      const net = quickNetworks[val];
+      const net = KNOWN_NETWORKS[val];
       if (net) {
         try {
           await send('SET_NETWORK', { network: net });
@@ -1215,12 +1628,7 @@ function attachHandlers(): void {
         if (sec) sec.style.display = 'block';
         return;
       }
-      const networks: Record<string, { name: string; chainId: number; rpcUrl: string }> = {
-        devnet: { name: 'Shell Devnet', chainId: 424242, rpcUrl: 'http://127.0.0.1:8545' },
-        testnet: { name: 'Shell Testnet', chainId: 10, rpcUrl: 'https://rpc.testnet.shell.network' },
-        mainnet: { name: 'Shell Mainnet', chainId: 100000, rpcUrl: 'https://rpc.mainnet.shell.network' },
-      };
-      const net = networks[val];
+      const net = KNOWN_NETWORKS[val];
       if (net) {
         try {
           await send('SET_NETWORK', { network: net });
@@ -1264,6 +1672,101 @@ function attachHandlers(): void {
     await send('SET_AUTO_LOCK', { minutes });
     state.autoLockMinutes = minutes;
     showToast('Auto-lock updated');
+  });
+
+  on('btn-authorize-session', 'click', async () => {
+    const password = (document.getElementById('session-password') as HTMLInputElement)?.value ?? '';
+    const sessionIndex = (document.getElementById('session-index') as HTMLInputElement)?.value?.trim() ?? '0';
+    const rootAccountIndex = (document.getElementById('session-root-index') as HTMLInputElement)?.value?.trim() ?? '0';
+    const expiryBlock = (document.getElementById('session-expiry') as HTMLInputElement)?.value?.trim() ?? '';
+    const valueCap = (document.getElementById('session-value-cap') as HTMLInputElement)?.value?.trim() ?? '0';
+    const target = (document.getElementById('session-target') as HTMLInputElement)?.value?.trim() ?? '';
+    const txSigningHash = (document.getElementById('session-tx-hash') as HTMLInputElement)?.value?.trim() ?? '';
+
+    state.sessionPassword = password;
+    state.sessionIndex = sessionIndex;
+    state.sessionRootAccountIndex = rootAccountIndex;
+    state.sessionExpiryBlock = expiryBlock;
+    state.sessionValueCap = valueCap;
+    state.sessionTarget = target;
+    state.sessionTxSigningHash = txSigningHash;
+
+    if (!password) {
+      state.error = 'Enter wallet password';
+      render();
+      return;
+    }
+    if (!isNonNegativeIntegerString(sessionIndex) || !isNonNegativeIntegerString(rootAccountIndex)) {
+      state.error = 'Account and session indices must be non-negative integers';
+      render();
+      return;
+    }
+    if (!isPositiveIntegerString(expiryBlock)) {
+      state.error = 'Expiry block must be a positive integer';
+      render();
+      return;
+    }
+    if (!isQuantityString(valueCap)) {
+      state.error = 'Value cap must be a hex or decimal quantity';
+      render();
+      return;
+    }
+    if (target && !/^0x[0-9a-fA-F]{64}$/.test(target)) {
+      state.error = 'Target must be a 0x + 64-char Shell address';
+      render();
+      return;
+    }
+    if (txSigningHash && !/^0x[0-9a-fA-F]{64}$/.test(txSigningHash)) {
+      state.error = 'Transaction signing hash must be 0x + 32 bytes';
+      render();
+      return;
+    }
+
+    state.error = '';
+    try {
+      const result = await send('AUTHORIZE_SESSION_KEY', {
+        password,
+        sessionIndex: Number(sessionIndex),
+        rootAccountIndex: Number(rootAccountIndex),
+        expiryBlock: Number(expiryBlock),
+        valueCap,
+        target: target || null,
+        txSigningHash: txSigningHash || undefined,
+      });
+      state.sessionPassword = '';
+      state.sessionAuthJson = JSON.stringify(result, null, 2);
+      render();
+      showToast('Session key authorized');
+    } catch (err) {
+      state.error = (err as Error).message;
+      render();
+    }
+  });
+
+  on('btn-copy-session-auth', 'click', () => {
+    copyText(state.sessionAuthJson, 'Session auth copied');
+  });
+
+  on('btn-rotate-key', 'click', async () => {
+    const password = (document.getElementById('rotate-password') as HTMLInputElement)?.value ?? '';
+    state.rotatePassword = password;
+    if (!password) {
+      state.error = 'Enter wallet password';
+      render();
+      return;
+    }
+    state.error = '';
+    try {
+      const result = await send<{ txHash: string; pqAddress: string }>('ROTATE_KEY', { password });
+      state.rotatePassword = '';
+      state.pendingRotationTxHash = result.txHash;
+      await refreshWalletData();
+      render();
+      showToast('Key rotation submitted');
+    } catch (err) {
+      state.error = (err as Error).message;
+      render();
+    }
   });
 
   on('btn-approval-approve', 'click', async () => {
@@ -1354,6 +1857,18 @@ export function parseOptionalNumber(value: string): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isNonNegativeIntegerString(value: string): boolean {
+  return /^(0|[1-9][0-9]*)$/.test(value);
+}
+
+function isPositiveIntegerString(value: string): boolean {
+  return /^[1-9][0-9]*$/.test(value);
+}
+
+function isQuantityString(value: string): boolean {
+  return /^(0|[1-9][0-9]*|0x[0-9a-fA-F]+)$/.test(value);
 }
 
 export function formatDisplayValue(value: string): string {

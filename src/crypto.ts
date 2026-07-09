@@ -139,6 +139,150 @@ export async function createKeystore(
 }
 
 /**
+ * Encrypt an HD seed (64 bytes) as a Shell-compatible keystore JSON.
+ *
+ * @param seed     - 64-byte BIP-39 seed.
+ * @param password - User password.
+ * @param address  - Default ML-DSA-65 account 0 address (used as label).
+ */
+export async function encryptHdSeed(
+  seed: Uint8Array,
+  password: string,
+  address: string,
+): Promise<ShellEncryptedKey> {
+  if (seed.length !== 64) throw new Error('HD seed must be exactly 64 bytes');
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const nonce = crypto.getRandomValues(new Uint8Array(24));
+  const params = DEFAULT_KDF_PARAMS;
+
+  const derivedKey = await deriveKey(password, salt, params);
+  const plaintext = seed.slice();
+  const cipher = xchacha20poly1305(derivedKey, nonce);
+  const ciphertext = cipher.encrypt(plaintext);
+  plaintext.fill(0);
+  derivedKey.fill(0);
+
+  return {
+    version: 1,
+    address,
+    key_type: 'hd-seed',
+    kdf: 'argon2id',
+    kdf_params: { m_cost: params.m_cost, t_cost: params.t_cost, p_cost: params.p_cost, salt: bytesToHex(salt) },
+    cipher: 'xchacha20-poly1305',
+    cipher_params: { nonce: bytesToHex(nonce) },
+    ciphertext: bytesToHex(ciphertext),
+    public_key: '',
+  };
+}
+
+/**
+ * Decrypt an HD seed keystore and return the 64-byte seed.
+ */
+export async function decryptHdSeed(
+  input: string | ShellEncryptedKey,
+  password: string,
+): Promise<Uint8Array> {
+  const ek: ShellEncryptedKey = typeof input === 'string' ? JSON.parse(input) : input;
+  if (ek.key_type !== 'hd-seed') throw new Error('Not an hd-seed keystore');
+  if (ek.kdf !== 'argon2id') throw new Error('Unsupported KDF: ' + ek.kdf);
+  if (ek.cipher !== 'xchacha20-poly1305') throw new Error('Unsupported cipher: ' + ek.cipher);
+
+  const salt = hexToBytes(ek.kdf_params.salt);
+  const nonce = hexToBytes(ek.cipher_params.nonce);
+  const ciphertext = hexToBytes(ek.ciphertext);
+
+  const derivedKey = await deriveKey(password, salt, {
+    m_cost: ek.kdf_params.m_cost,
+    t_cost: ek.kdf_params.t_cost,
+    p_cost: ek.kdf_params.p_cost,
+  });
+
+  let plaintext: Uint8Array;
+  try {
+    const cipher = xchacha20poly1305(derivedKey, nonce);
+    plaintext = cipher.decrypt(ciphertext);
+  } catch {
+    derivedKey.fill(0);
+    throw new Error('Incorrect password or corrupted HD seed keystore');
+  } finally {
+    derivedKey.fill(0);
+  }
+
+  if (plaintext.length !== 64) {
+    plaintext.fill(0);
+    throw new Error('HD seed must be exactly 64 bytes');
+  }
+  return plaintext;
+}
+
+/**
+ * Encrypt a BIP-39 mnemonic string for secure storage.
+ * The mnemonic is UTF-8-encoded and treated as the secret payload.
+ */
+export async function encryptMnemonic(
+  mnemonic: string,
+  password: string,
+): Promise<ShellEncryptedKey> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const nonce = crypto.getRandomValues(new Uint8Array(24));
+  const params = DEFAULT_KDF_PARAMS;
+
+  const derivedKey = await deriveKey(password, salt, params);
+  const plaintext = new TextEncoder().encode(mnemonic);
+  const cipher = xchacha20poly1305(derivedKey, nonce);
+  const ciphertext = cipher.encrypt(plaintext);
+  derivedKey.fill(0);
+
+  return {
+    version: 1,
+    address: '',
+    key_type: 'hd-mnemonic',
+    kdf: 'argon2id',
+    kdf_params: { m_cost: params.m_cost, t_cost: params.t_cost, p_cost: params.p_cost, salt: bytesToHex(salt) },
+    cipher: 'xchacha20-poly1305',
+    cipher_params: { nonce: bytesToHex(nonce) },
+    ciphertext: bytesToHex(ciphertext),
+    public_key: '',
+  };
+}
+
+/**
+ * Decrypt a mnemonic keystore and return the BIP-39 phrase.
+ */
+export async function decryptMnemonic(
+  input: string | ShellEncryptedKey,
+  password: string,
+): Promise<string> {
+  const ek: ShellEncryptedKey = typeof input === 'string' ? JSON.parse(input) : input;
+  if (ek.key_type !== 'hd-mnemonic') throw new Error('Not an hd-mnemonic keystore');
+  if (ek.kdf !== 'argon2id') throw new Error('Unsupported KDF: ' + ek.kdf);
+  if (ek.cipher !== 'xchacha20-poly1305') throw new Error('Unsupported cipher: ' + ek.cipher);
+
+  const salt = hexToBytes(ek.kdf_params.salt);
+  const nonce = hexToBytes(ek.cipher_params.nonce);
+  const ciphertext = hexToBytes(ek.ciphertext);
+
+  const derivedKey = await deriveKey(password, salt, {
+    m_cost: ek.kdf_params.m_cost,
+    t_cost: ek.kdf_params.t_cost,
+    p_cost: ek.kdf_params.p_cost,
+  });
+
+  let plaintext: Uint8Array;
+  try {
+    const cipher = xchacha20poly1305(derivedKey, nonce);
+    plaintext = cipher.decrypt(ciphertext);
+  } catch {
+    derivedKey.fill(0);
+    throw new Error('Incorrect password or corrupted mnemonic keystore');
+  } finally {
+    derivedKey.fill(0);
+  }
+
+  return new TextDecoder().decode(plaintext);
+}
+
+/**
  * Decrypt a Shell keystore and return the raw key pair bytes.
  * Compatible with Shell CLI keystores (argon2id + xchacha20-poly1305).
  */

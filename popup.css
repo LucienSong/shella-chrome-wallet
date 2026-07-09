@@ -269,9 +269,26 @@ input:focus, .select-input:focus { border-color: #1a6ef5; }
 .wallet-meta {
   display: grid;
   gap: 4px;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
   color: #777;
   font-size: 11px;
+}
+
+.node-info-card {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 6px 10px;
+  background: #111;
+  border: 1px solid #222;
+  border-radius: 8px;
+  font-size: 11px;
+  color: #4caf50;
+}
+
+.node-info-item {
+  white-space: nowrap;
 }
 
 .pending-card {
