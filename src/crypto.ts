@@ -53,7 +53,7 @@ async function deriveKey(
  * @param secretKey - Raw secret key bytes.
  * @param publicKey - Raw public key bytes.
  * @param password  - User password for encryption.
- * @param address   - pq1… bech32m address.
+ * @param address   - 0x… hex address.
  * @param keyType   - Key type string, e.g. "mldsa65".
  */
 export async function createKeystore(

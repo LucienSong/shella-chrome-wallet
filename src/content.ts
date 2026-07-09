@@ -20,7 +20,10 @@ function injectInpageScript(): void {
 }
 
 window.addEventListener('message', (event: MessageEvent<ProviderRequestPayload>) => {
+  // Reject messages from frames or windows with a different origin to prevent
+  // nested-iframe spoofing attacks.
   if (event.source !== window) return;
+  if (event.origin !== window.location.origin) return;
   if (!event.data || event.data.target !== REQUEST_TARGET || typeof event.data.id !== 'string') return;
 
   const { id, method, params } = event.data;

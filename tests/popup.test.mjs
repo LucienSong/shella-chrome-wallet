@@ -10,18 +10,34 @@ import { describe, test, before } from 'node:test';
 const domElements = new Map();
 
 function makeEl(id = '') {
-  return {
+  const element = {
     id,
     innerHTML: '',
-    textContent: '',
+    _textContent: '',
     className: '',
     style: { display: '' },
     value: '',
     files: null,
     _listeners: {},
     addEventListener(ev, fn) { this._listeners[ev] = fn; },
+    appendChild(child) {
+      const attrs = [
+        child.id ? ` id="${child.id}"` : '',
+        child.className ? ` class="${child.className}"` : '',
+      ].join('');
+      this.innerHTML += `<${(child.tagName ?? 'div').toLowerCase()}${attrs}>${child.innerHTML ?? child.textContent ?? ''}</${(child.tagName ?? 'div').toLowerCase()}>`;
+      return child;
+    },
     dispatchEvent() {},
   };
+  Object.defineProperty(element, 'textContent', {
+    get() { return this._textContent; },
+    set(value) {
+      this._textContent = value;
+      if (value === '') this.innerHTML = '';
+    },
+  });
+  return element;
 }
 
 const appEl = makeEl('app');
@@ -32,11 +48,7 @@ domElements.set('toast', toastEl);
 globalThis.document = {
   getElementById: (id) => domElements.get(id) ?? null,
   querySelectorAll: () => [],
-  createElement: () => ({
-    style: {}, href: '', download: '', tagName: 'a',
-    click() {}, select() {}, value: '',
-    addEventListener() {},
-  }),
+  createElement: (tagName) => ({ ...makeEl(), tagName, href: '', download: '', click() {}, select() {} }),
   body: { appendChild() {}, removeChild() {} },
 };
 
@@ -137,5 +149,59 @@ describe('popup', async () => {
     assert.equal(parseOptionalNumber(''), undefined);
     assert.equal(parseOptionalNumber('abc'), undefined);
     assert.equal(parseOptionalNumber('0'), 0);
+  });
+
+  test('transaction history labels display reward, batch, and transfer types', async () => {
+    const mod = await import('../dist/popup.js');
+    const { formatTxHistoryType, formatTxHistoryLabel } = mod;
+
+    assert.equal(formatTxHistoryType({
+      txHash: '0x1',
+      from: 'pq1from',
+      to: 'pq1to',
+      value: '0',
+      data: '0x',
+      createdAt: 1,
+      updatedAt: 1,
+      status: 'confirmed',
+      source: 'remote',
+      shellType: 'blockGasReward',
+    }), 'Block Reward');
+    assert.equal(formatTxHistoryLabel({
+      txHash: '0x2',
+      from: 'pq1from',
+      to: 'pq1to',
+      value: '0',
+      data: '0x',
+      createdAt: 1,
+      updatedAt: 1,
+      status: 'confirmed',
+      source: 'remote',
+      shellType: 'starkReward',
+    }), 'STARK Reward');
+    assert.equal(formatTxHistoryType({
+      txHash: '0x3',
+      from: 'pq1from',
+      to: 'pq1to',
+      value: '0',
+      data: '0x',
+      createdAt: 1,
+      updatedAt: 1,
+      status: 'confirmed',
+      source: 'remote',
+      txType: '0x7e',
+      innerCallCount: 2,
+    }), '⚡ Batch (2 calls)');
+    assert.equal(formatTxHistoryLabel({
+      txHash: '0x4',
+      from: 'pq1from',
+      to: 'pq1to',
+      value: '1000000000000000000',
+      data: '0x',
+      createdAt: 1,
+      updatedAt: 1,
+      status: 'confirmed',
+      source: 'remote',
+    }), '1.000000 SHELL');
   });
 });

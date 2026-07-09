@@ -6,7 +6,6 @@
  */
 
 import { MlDsa65Adapter, generateMlDsa65KeyPair } from 'shell-sdk/adapters';
-import { normalizeHexAddress } from 'shell-sdk/address';
 import { createShellProvider } from 'shell-sdk/provider';
 import { ShellSigner } from 'shell-sdk/signer';
 import { buildTransaction, buildTransferTransaction, hashTransaction } from 'shell-sdk/transactions';
@@ -47,6 +46,8 @@ import type {
 
 const AUTO_LOCK_ALARM = 'shella-auto-lock';
 const TX_POLL_ALARM = 'shella-tx-poll';
+// Approval requests expire after this many ms to prevent stale popup resolution.
+const APPROVAL_TTL_MS = 10 * 60 * 1000;
 
 let currentSigner: ShellSigner | null = null;
 const pendingApprovals = new Map<
@@ -56,6 +57,11 @@ const pendingApprovals = new Map<
     resolve: (approved: boolean) => void;
   }
 >();
+
+// In-memory nonce tracker: prevents concurrent sendTransaction calls from
+// allocating the same nonce before the first is committed to txQueue storage.
+// Maps normalised-lowercase address → highest nonce already allocated this session.
+const allocatedNonces = new Map<string, number>();
 
 chrome.runtime.onInstalled.addListener(async () => {
   await initStore();
@@ -78,7 +84,23 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+// WALLET-M2: Privileged operations must only be invoked from extension pages (popup/options),
+// not from content scripts. Content scripts always have sender.tab set.
+const PRIVILEGED_MESSAGE_TYPES = new Set([
+  'CREATE_WALLET', 'IMPORT_KEYSTORE', 'UNLOCK_WALLET', 'LOCK_WALLET', 'RESET_WALLET',
+  'EXPORT_KEYSTORE', 'SEND_TX', 'SIGN',
+]);
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  const type = (msg as { type?: string }).type ?? '';
+  // sender may be undefined in test environments; treat undefined as extension page
+  const fromExtensionPage = !sender?.tab; // content scripts always have sender.tab
+
+  if (PRIVILEGED_MESSAGE_TYPES.has(type) && !fromExtensionPage) {
+    sendResponse({ ok: false, error: 'Unauthorized' });
+    return true;
+  }
+
   handleMessage(msg as { type: string; [key: string]: unknown })
     .then(sendResponse)
     .catch((err: unknown) => {
@@ -191,15 +213,16 @@ export async function handleMessage(msg: { type: string; [key: string]: unknown 
   }
 }
 
-async function createWallet(password: string): Promise<{ pqAddress: string; hexAddress: string }> {
+async function createWallet(password: string): Promise<{ pqAddress: string }> {
   const { publicKey: pk, secretKey: sk } = generateMlDsa65KeyPair();
-  const adapter = MlDsa65Adapter.fromKeyPair(pk, sk);
+  // WALLET-H1: pass an owned copy into the adapter so that zeroing sk below
+  // does not corrupt the live signer's key buffer.
+  const adapter = MlDsa65Adapter.fromKeyPair(pk, sk.slice());
   const signer = new ShellSigner('MlDsa65', adapter);
   const pqAddress = signer.getAddress();
-  const hexAddress = signer.getHexAddress();
 
   const keystore = await createKeystore(sk, pk, password, pqAddress, 'mldsa65');
-  const account: StoredAccount = { pqAddress, hexAddress, keystoreJson: JSON.stringify(keystore) };
+  const account: StoredAccount = { pqAddress, keystoreJson: JSON.stringify(keystore) };
   await addAccount(account);
 
   currentSigner = signer;
@@ -208,32 +231,33 @@ async function createWallet(password: string): Promise<{ pqAddress: string; hexA
     unlockedAt: Date.now(),
   });
   await scheduleAutoLock();
-  sk.fill(0);
+  sk.fill(0); // zero ephemeral local copy; adapter holds its own copy
 
-  return { pqAddress, hexAddress };
+  return { pqAddress };
 }
 
 async function importKeystore(
   keystoreJson: string,
   password: string,
-): Promise<{ pqAddress: string; hexAddress: string }> {
+): Promise<{ pqAddress: string }> {
   const parsed = parseKeystorePayload(keystoreJson);
   const { secretKey, publicKey } = await decryptKeystore(parsed, password);
 
-  const adapter = MlDsa65Adapter.fromKeyPair(publicKey, secretKey);
+  // WALLET-H1: pass an owned copy into the adapter so that zeroing secretKey below
+  // does not corrupt the live signer's key buffer.
+  const adapter = MlDsa65Adapter.fromKeyPair(publicKey, secretKey.slice());
   const signer = new ShellSigner('MlDsa65', adapter);
   const pqAddress = signer.getAddress();
-  const hexAddress = signer.getHexAddress();
 
-  const account: StoredAccount = { pqAddress, hexAddress, keystoreJson: JSON.stringify(parsed) };
+  const account: StoredAccount = { pqAddress, keystoreJson: JSON.stringify(parsed) };
   await addAccount(account);
 
   currentSigner = signer;
   await setSessionState({ unlockedPqAddress: pqAddress, unlockedAt: Date.now() });
   await scheduleAutoLock();
-  secretKey.fill(0);
+  secretKey.fill(0); // zero ephemeral local copy; adapter holds its own copy
 
-  return { pqAddress, hexAddress };
+  return { pqAddress };
 }
 
 async function unlockWallet(password: string): Promise<{ ok: boolean; pqAddress?: string }> {
@@ -243,12 +267,14 @@ async function unlockWallet(password: string): Promise<{ ok: boolean; pqAddress?
   const account = accounts[0];
   const { secretKey, publicKey } = await decryptKeystore(account.keystoreJson, password);
 
-  const adapter = MlDsa65Adapter.fromKeyPair(publicKey, secretKey);
+  // WALLET-H1: pass an owned copy into the adapter so that zeroing secretKey below
+  // does not corrupt the live signer's key buffer.
+  const adapter = MlDsa65Adapter.fromKeyPair(publicKey, secretKey.slice());
   currentSigner = new ShellSigner('MlDsa65', adapter);
 
   await setSessionState({ unlockedPqAddress: account.pqAddress, unlockedAt: Date.now() });
   await scheduleAutoLock();
-  secretKey.fill(0);
+  secretKey.fill(0); // zero ephemeral local copy; adapter holds its own copy
 
   return { ok: true, pqAddress: account.pqAddress };
 }
@@ -273,8 +299,8 @@ async function getWalletSnapshot(): Promise<WalletSnapshot> {
   try {
     const provider = buildProvider(wallet.network);
     const [balance, nonce, detectedChainId, nodeInfo] = await Promise.all([
-      provider.client.getBalance({ address: primaryAccount.hexAddress as `0x${string}` }),
-      provider.client.getTransactionCount({ address: primaryAccount.hexAddress as `0x${string}` }),
+      provider.client.getBalance({ address: asPqAddress(primaryAccount.pqAddress, 'getBalance') }),
+      provider.client.getTransactionCount({ address: asPqAddress(primaryAccount.pqAddress, 'getTransactionCount') }),
       provider.client.getChainId(),
       getNodeInfoFromNode(wallet.network.rpcUrl).catch(() => null),
     ]);
@@ -306,8 +332,7 @@ async function getWalletSnapshot(): Promise<WalletSnapshot> {
 async function getBalance(address: string): Promise<{ balance: string; formatted: string }> {
   const network = await getNetwork();
   const provider = buildProvider(network);
-  const hexAddr = address.startsWith('0x') ? (address as `0x${string}`) : toHexAddress(address);
-  const balance = await provider.client.getBalance({ address: hexAddr });
+  const balance = await provider.client.getBalance({ address: asPqAddress(address, 'getBalance') });
   return { balance: balance.toString(), formatted: formatEther(balance) };
 }
 
@@ -316,12 +341,12 @@ async function sendTransaction(params: SendTransactionParams): Promise<{ txHash:
 
   const network = await getNetwork();
   const provider = buildProvider(network);
-  const from = currentSigner.getHexAddress();
+  const from = currentSigner.getAddress();
   const to = normalizeRecipient(params.to);
   const valueBigInt = parseEtherValue(params.value);
   const data = normalizeData(params.data);
 
-  const onChainNonce = await provider.client.getTransactionCount({ address: from });
+  const onChainNonce = await provider.client.getTransactionCount({ address: asPqAddress(from, 'getTransactionCount') });
   const nonce = await allocateNextNonce(from, onChainNonce);
   const tx = data === '0x'
     ? buildTransferTransaction({
@@ -354,7 +379,7 @@ async function sendTransaction(params: SendTransactionParams): Promise<{ txHash:
   await upsertTxRecord({
     txHash,
     from,
-    to: to.startsWith('0x') ? to : normalizeHexAddress(to),
+    to,
     value: valueBigInt.toString(),
     data,
     nonce,
@@ -384,8 +409,7 @@ async function getTxHistory(
     .filter((tx): tx is WalletTxRecord => tx !== null);
 
   const localTxs = (await getTxQueue()).filter((tx) => {
-    const normalized = address.startsWith('0x') ? address.toLowerCase() : toHexAddress(address).toLowerCase();
-    return tx.from.toLowerCase() === normalized || tx.to.toLowerCase() === normalized;
+    return tx.from.toLowerCase() === address.toLowerCase() || tx.to.toLowerCase() === address.toLowerCase();
   });
 
   const merged = new Map<string, WalletTxRecord>();
@@ -431,18 +455,22 @@ async function pollPendingTransactions(): Promise<void> {
   await scheduleTxPolling();
 }
 
-async function allocateNextNonce(from: `0x${string}`, onChainNonce: number): Promise<number> {
+async function allocateNextNonce(from: string, onChainNonce: number): Promise<number> {
+  const key = from.toLowerCase();
   const txQueue = await getTxQueue();
   const pendingNonces = txQueue
-    .filter((tx) => tx.status === 'pending' && tx.from.toLowerCase() === from.toLowerCase())
+    .filter((tx) => tx.status === 'pending' && tx.from.toLowerCase() === key)
     .map((tx) => tx.nonce)
     .filter((nonce): nonce is number => nonce != null)
     .sort((a, b) => b - a);
 
-  if (pendingNonces.length === 0) {
-    return onChainNonce;
-  }
-  return Math.max(onChainNonce, pendingNonces[0] + 1);
+  // Also consider nonces already handed out this session but not yet in the queue
+  // (covers the race window between allocateNextNonce returning and upsertTxRecord writing).
+  const inFlight = allocatedNonces.get(key) ?? -1;
+  const queueMax = pendingNonces.length > 0 ? pendingNonces[0] : -1;
+  const next = Math.max(onChainNonce, queueMax + 1, inFlight + 1);
+  allocatedNonces.set(key, next);
+  return next;
 }
 
 async function getNodeInfoFromNode(rpcUrl: string): Promise<WalletNodeInfo | null> {
@@ -481,14 +509,13 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
         origin,
         createdAt: Date.now(),
         payload: {
-          account: primaryAccount.hexAddress,
           pqAddress: primaryAccount.pqAddress,
           chainId: network.chainId,
           networkName: network.name,
         },
       });
       if (!approved) throw new Error('Request rejected by user');
-      const granted = buildConnectedSite(origin, primaryAccount.hexAddress, network.chainId, permission?.grantedAt);
+      const granted = buildConnectedSite(origin, primaryAccount.pqAddress, network.chainId, permission?.grantedAt);
       await addConnectedSite(granted);
       return granted.accounts;
     }
@@ -503,8 +530,8 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
     case 'eth_getBalance': {
       const [address] = normalizeArrayParams(message.params);
       if (typeof address !== 'string') throw new Error('eth_getBalance requires an address');
-      const hexAddress = address.startsWith('0x') ? normalizeHexAddress(address) : toHexAddress(address);
-      const balance = await provider.client.getBalance({ address: hexAddress });
+      if (!/^0x[0-9a-fA-F]{64}$/.test(address)) throw new Error('eth_getBalance: address must be 0x + 64-char hex');
+      const balance = await provider.client.getBalance({ address: asPqAddress(address, 'eth_getBalance') });
       return `0x${balance.toString(16)}`;
     }
     case 'eth_sendTransaction': {
@@ -514,7 +541,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
       if (!tx || typeof tx !== 'object') throw new Error('eth_sendTransaction requires a transaction object');
       const candidate = tx as Record<string, unknown>;
       const from = optionalString(candidate.from);
-      if (from && normalizeHexAddress(from) !== permission.accounts[0]) {
+      if (from && from !== permission.accounts[0]) {
         throw new Error('Requested from account is not permitted for this site');
       }
       const request = {
@@ -548,7 +575,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
       const data = normalizeData(optionalString(candidate.data) ?? optionalString(candidate.input));
       const value = normalizeOptionalRpcBigInt(optionalString(candidate.value), 'eth_call.value');
       return provider.client.call({
-        to: normalizeHexAddress(to),
+        to: asPqAddress(normalizeRecipient(to), 'eth_call.to'),
         data,
         value,
       });
@@ -597,7 +624,8 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
       const nextNetwork: Network = {
         name: optionalString(candidate.chainName) ?? `Chain ${chainId}`,
         chainId,
-        rpcUrl: rpcUrls[0],
+        // WALLET-H2: validate scheme and host before storing or using the URL.
+        rpcUrl: validateRpcUrl(rpcUrls[0], 'rpcUrls[0]'),
       };
       const approved = await requestUserApproval({
         kind: 'add-chain',
@@ -612,7 +640,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
       if (!approved) throw new Error('Request rejected by user');
       await setNetwork(nextNetwork);
       if (primaryAccount) {
-        await addConnectedSite(buildConnectedSite(origin, primaryAccount.hexAddress, nextNetwork.chainId, permission?.grantedAt));
+        await addConnectedSite(buildConnectedSite(origin, primaryAccount.pqAddress, nextNetwork.chainId, permission?.grantedAt));
       }
       return null;
     }
@@ -668,14 +696,14 @@ function buildProvider(network: Network) {
 
 function buildConnectedSite(
   origin: string,
-  hexAddress: string,
+  pqAddress: string,
   chainId: number,
   grantedAt: number = Date.now(),
 ): ConnectedSitePermission {
   const now = Date.now();
   return {
     origin,
-    accounts: [normalizeHexAddress(hexAddress)],
+    accounts: [pqAddress],
     chainId,
     grantedAt,
     lastUsedAt: now,
@@ -687,13 +715,17 @@ async function getConnectedPermission(origin: string): Promise<ConnectedSitePerm
   return sites.find((site) => site.origin === origin) ?? null;
 }
 
+// WALLET-L1: use cryptographically secure RNG for all request/approval IDs.
+function generateRequestId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function requestUserApproval(
   input: Omit<ApprovalRequest, 'id'>,
 ): Promise<boolean> {
-  const requestId =
-    typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : `approval-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const requestId = generateRequestId();
 
   const request: ApprovalRequest = { id: requestId, ...input };
 
@@ -726,6 +758,10 @@ function getApprovalRequest(requestId: string): ApprovalRequest {
 function resolveApprovalRequest(requestId: string, approved: boolean): { ok: true } {
   const pending = pendingApprovals.get(requestId);
   if (!pending) throw new Error('Approval request not found');
+  if (Date.now() - pending.request.createdAt > APPROVAL_TTL_MS) {
+    pendingApprovals.delete(requestId);
+    throw new Error('Approval request has expired');
+  }
   pendingApprovals.delete(requestId);
   pending.resolve(approved);
   return { ok: true };
@@ -826,6 +862,8 @@ function normalizeRemoteTxRecord(value: unknown): WalletTxRecord | null {
 
   // AA bundle info
   const txType = optionalString(tx.type);
+  const shellType = optionalString(tx.shellType);
+  const rewardKind = optionalString(tx.rewardKind);
   const bundle = tx.aa_bundle as Record<string, unknown> | null | undefined;
   const innerCalls = Array.isArray(bundle?.inner_calls) ? bundle!.inner_calls : null;
   const paymaster = bundle?.paymaster ? optionalString(bundle.paymaster as unknown) : null;
@@ -842,6 +880,15 @@ function normalizeRemoteTxRecord(value: unknown): WalletTxRecord | null {
     blockNumber: optionalString(tx.blockNumber) ?? null,
     source: 'remote',
     txType: txType ?? undefined,
+    shellType: shellType ?? null,
+    rewardKind: rewardKind ?? null,
+    rewardLayer: optionalString(tx.rewardLayer) ?? null,
+    rewardSourceHash: optionalString(tx.rewardSourceHash) ?? null,
+    originalSize: optionalString(tx.originalSize) ?? null,
+    compressedSize: optionalString(tx.compressedSize) ?? null,
+    decodedInput: typeof tx.decodedInput === 'object' && tx.decodedInput !== null
+      ? tx.decodedInput as WalletTxRecord['decodedInput']
+      : null,
     paymaster: paymaster ?? null,
     innerCallCount: innerCalls != null ? innerCalls.length : null,
   };
@@ -855,8 +902,7 @@ function normalizeRemoteStatus(status: string | undefined): WalletTxRecord['stat
 
 function normalizeRecipient(address: string): string {
   if (!address) throw new Error('Recipient address is required');
-  if (address.startsWith('0x')) return normalizeHexAddress(address);
-  if (!address.startsWith('pq1')) throw new Error('Recipient must be a pq1… or 0x… address');
+  if (!/^0x[0-9a-fA-F]{64}$/.test(address)) throw new Error('Recipient must be a 0x + 64-char hex Shell address');
   return address;
 }
 
@@ -877,8 +923,37 @@ function validateNetwork(value: unknown): Network {
   return {
     name: requireString(network.name, 'network.name'),
     chainId: requireNumber(network.chainId, 'network.chainId'),
-    rpcUrl: requireString(network.rpcUrl, 'network.rpcUrl'),
+    rpcUrl: validateRpcUrl(requireString(network.rpcUrl, 'network.rpcUrl'), 'network.rpcUrl'),
   };
+}
+
+// WALLET-H2: Validate that an RPC URL uses an approved scheme and is not a
+// private/loopback address (except localhost which is permitted for dev use).
+function validateRpcUrl(url: string, field: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`${field} must be a valid URL`);
+  }
+
+  const { protocol, hostname } = parsed;
+  const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+
+  if (protocol !== 'https:' && !(protocol === 'http:' && isLocalhost)) {
+    throw new Error(`${field} must use https (or http for localhost only)`);
+  }
+
+  // Reject private IP ranges that are not localhost.
+  if (!isLocalhost) {
+    const privateRangePattern =
+      /^(10\.\d+\.\d+\.\d+|127\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+)$/;
+    if (privateRangePattern.test(hostname)) {
+      throw new Error(`${field} must not point to a private IP address`);
+    }
+  }
+
+  return url;
 }
 
 function requirePassword(value: unknown): string {
@@ -911,11 +986,6 @@ function optionalNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function toHexAddress(pqAddress: string): `0x${string}` {
-  if (pqAddress.startsWith('0x')) return pqAddress as `0x${string}`;
-  return normalizeHexAddress(pqAddress);
-}
-
 function formatEther(wei: bigint): string {
   const eth = Number(wei) / 1e18;
   return eth.toFixed(6);
@@ -924,6 +994,17 @@ function formatEther(wei: bigint): string {
 function parseEtherValue(value: string): bigint {
   if (value.startsWith('0x')) return BigInt(value);
   return parseEther(value as `${number}`);
+}
+
+/**
+ * Assert that an address is a valid 0x Shell address before the cast to `0x${string}` needed by viem.
+ * The Shell provider handles 0x hex addresses natively; the cast only satisfies TypeScript types.
+ */
+function asPqAddress(address: string, context: string): `0x${string}` {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(address)) {
+    throw new Error(`${context}: expected 0x + 64-char hex Shell address, got "${address.slice(0, 12)}…"`);
+  }
+  return address as unknown as `0x${string}`;
 }
 
 function toSafeErrorMessage(err: unknown): string {
@@ -942,10 +1023,11 @@ function toSafeErrorMessage(err: unknown): string {
     message === 'Interactive approval required' ||
     message === 'Request rejected by user' ||
     message === 'Recipient address is required' ||
-    message === 'Recipient must be a pq1… or 0x… address' ||
+    message === 'Recipient must be a 0x + 64-char hex Shell address' ||
     message === 'Calldata must be an even-length 0x-prefixed hex string' ||
     message === 'Network payload is invalid' ||
     message === 'Approval request not found' ||
+    message === 'Approval request has expired' ||
     message === 'Unknown chain. Use wallet_addEthereumChain first.' ||
     message.startsWith('Site not connected:') ||
     message.startsWith('Unsupported dApp method:') ||

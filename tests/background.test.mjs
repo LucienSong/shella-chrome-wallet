@@ -46,6 +46,7 @@ let txCounter = 0;
 const createdAlarms = [];
 const clearedAlarms = [];
 const createdWindows = [];
+let shellTxHistoryResult = { transactions: [], total: 0 };
 
 globalThis.chrome = {
   runtime: {
@@ -83,7 +84,7 @@ globalThis.fetch = async (url, init) => {
     eth_chainId: '0x67932',
     eth_blockNumber: '0x2a',
     eth_call: '0x',
-    shell_getTransactionsByAddress: { transactions: [], total: 0 },
+    shell_getTransactionsByAddress: shellTxHistoryResult,
   };
 
   if (body.method === 'shell_sendTransaction') {
@@ -106,6 +107,7 @@ globalThis.fetch = async (url, init) => {
 };
 
 const { handleMessage } = await import('../dist/background.js');
+const SHELL_ADDRESS_RE = /^0x[0-9a-f]{64}$/;
 
 function resetAlarmState() {
   createdAlarms.length = 0;
@@ -141,8 +143,7 @@ test('create wallet -> snapshot -> export -> reset -> import', async () => {
   await handleMessage({ type: 'RESET_WALLET' });
 
   const created = await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
-  assert.match(created.pqAddress, /^pq1/);
-  assert.match(created.hexAddress, /^0x[0-9a-f]+$/);
+  assert.match(created.pqAddress, SHELL_ADDRESS_RE);
 
   const snapshot = await handleMessage({ type: 'GET_WALLET_SNAPSHOT' });
   assert.equal(snapshot.locked, false);
@@ -164,24 +165,24 @@ test('create wallet -> snapshot -> export -> reset -> import', async () => {
     password: 'correct horse battery',
   });
   assert.equal(imported.pqAddress, created.pqAddress);
-  assert.equal(imported.hexAddress, created.hexAddress);
 });
 
 test('send transaction records local pending activity', async () => {
   txCounter = 0;
+  shellTxHistoryResult = { transactions: [], total: 0 };
   resetAlarmState();
   await handleMessage({ type: 'RESET_WALLET' });
   const created = await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
 
   const sent = await handleMessage({
     type: 'SEND_TX',
-    to: '0x1111111111111111111111111111111111111111',
+    to: created.pqAddress,
     value: '1.25',
     data: '0x',
   });
   const sentSecond = await handleMessage({
     type: 'SEND_TX',
-    to: '0x2222222222222222222222222222222222222222',
+    to: created.pqAddress,
     value: '0.5',
     data: '0x',
   });
@@ -200,6 +201,58 @@ test('send transaction records local pending activity', async () => {
   assert.equal(history.txs[0].source, 'local');
   assert.equal(history.txs[1].source, 'local');
   assert.deepEqual(history.txs.map((tx) => tx.nonce).sort((a, b) => a - b), [0, 1]);
+});
+
+test('remote transaction history preserves reward metadata', async () => {
+  txCounter = 0;
+  resetAlarmState();
+  await handleMessage({ type: 'RESET_WALLET' });
+  const created = await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
+
+  shellTxHistoryResult = {
+    total: 1,
+    transactions: [{
+      hash: '0x' + 'a'.repeat(64),
+      from: 'pq1prover',
+      to: created.pqAddress,
+      value: '50000000000000000000',
+      input: '0x',
+      timestamp: 1234,
+      status: 'confirmed',
+      blockNumber: '0x2a',
+      type: '0x0',
+      shellType: 'starkReward',
+      rewardKind: 'starkReward',
+      rewardLayer: '0x2',
+      rewardSourceHash: '0x' + 'b'.repeat(64),
+      originalSize: '0x2710',
+      compressedSize: '0x80',
+    }],
+  };
+
+  const history = await handleMessage({
+    type: 'GET_TX_HISTORY',
+    address: created.pqAddress,
+    page: 0,
+  });
+
+  assert.equal(history.total, 1);
+  assert.equal(history.txs.length, 1);
+  assert.deepEqual({
+    shellType: history.txs[0].shellType,
+    rewardKind: history.txs[0].rewardKind,
+    rewardLayer: history.txs[0].rewardLayer,
+    rewardSourceHash: history.txs[0].rewardSourceHash,
+    originalSize: history.txs[0].originalSize,
+    compressedSize: history.txs[0].compressedSize,
+  }, {
+    shellType: 'starkReward',
+    rewardKind: 'starkReward',
+    rewardLayer: '0x2',
+    rewardSourceHash: '0x' + 'b'.repeat(64),
+    originalSize: '0x2710',
+    compressedSize: '0x80',
+  });
 });
 
 test('wrong password is reported safely and without internal details', async () => {
@@ -294,12 +347,12 @@ test('dapp provider grants site access and proxies read methods', async () => {
   });
   await resolveLatestApproval(true, approvalsBeforeConnect);
   const accounts = await accountsPromise;
-  assert.deepEqual(accounts, [created.hexAddress]);
+  assert.deepEqual(accounts, [created.pqAddress]);
 
   const connected = await handleMessage({ type: 'GET_CONNECTED_SITES' });
   assert.equal(connected.sites.length, 1);
   assert.equal(connected.sites[0].origin, 'https://app.shell.org');
-  assert.deepEqual(connected.sites[0].accounts, [created.hexAddress]);
+  assert.deepEqual(connected.sites[0].accounts, [created.pqAddress]);
 
   const chainId = await handleMessage({
     type: 'DAPP_REQUEST',
@@ -357,8 +410,8 @@ test('dapp provider can send a transaction for a connected site', async () => {
     origin: 'https://swap.example.com',
     method: 'eth_sendTransaction',
     params: [{
-      from: created.hexAddress,
-      to: '0x3333333333333333333333333333333333333333',
+      from: created.pqAddress,
+      to: created.pqAddress,
       value: '0xde0b6b3a7640000',
       data: '0x',
     }],
@@ -414,6 +467,119 @@ test('wallet_addEthereumChain requires an existing connection and approval', asy
 
   const network = await handleMessage({ type: 'GET_NETWORK' });
   assert.equal(network.network.chainId, 0x1234);
+});
+
+test('WALLET-H1: signing works after create/unlock (key not zeroed inside adapter)', async () => {
+  txCounter = 0;
+  resetAlarmState();
+  await handleMessage({ type: 'RESET_WALLET' });
+
+  // Create wallet — H1 bug would zero the adapter key here
+  const created = await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
+  assert.ok(created.pqAddress, 'CREATE_WALLET must return a pqAddress');
+
+  // If the signer's key were zeroed, SEND_TX would produce a zero-key signature
+  // that the RPC mock would reject or return a wrong txHash.
+  const sent = await handleMessage({
+    type: 'SEND_TX',
+    to: created.pqAddress,
+    value: '0.1',
+    data: '0x',
+  });
+  assert.match(sent.txHash, /^0x[0-9a-f]+$/, 'SEND_TX after CREATE_WALLET should return a valid txHash');
+
+  // Lock then re-unlock and sign again — H1 also affects unlockWallet path.
+  await handleMessage({ type: 'LOCK_WALLET' });
+  const unlocked = await handleMessage({ type: 'UNLOCK_WALLET', password: 'correct horse battery' });
+  assert.equal(unlocked.ok, true);
+
+  const sentAfterUnlock = await handleMessage({
+    type: 'SEND_TX',
+    to: created.pqAddress,
+    value: '0.1',
+    data: '0x',
+  });
+  assert.match(sentAfterUnlock.txHash, /^0x[0-9a-f]+$/, 'SEND_TX after UNLOCK_WALLET should return a valid txHash');
+});
+
+test('WALLET-H2: wallet_addEthereumChain rejects non-https and private IP RPC URLs', async () => {
+  txCounter = 0;
+  resetAlarmState();
+  await handleMessage({ type: 'RESET_WALLET' });
+  await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
+
+  // Connect site first
+  const approvalsBeforeConnect = createdWindows.length;
+  const connectPromise = handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://evil.example',
+    method: 'eth_requestAccounts',
+    params: [],
+  });
+  await resolveLatestApproval(true, approvalsBeforeConnect);
+  await connectPromise;
+
+  const badUrls = [
+    'http://192.168.1.1:8545',
+    'http://10.0.0.1',
+    'http://172.16.0.1',
+    'https://127.0.0.2',
+    'ftp://rpc.example',
+    'javascript:alert(1)',
+    'not-a-url',
+  ];
+
+  for (const rpcUrl of badUrls) {
+    const response = await dispatchRuntimeMessage({
+      type: 'DAPP_REQUEST',
+      origin: 'https://evil.example',
+      method: 'wallet_addEthereumChain',
+      params: [{ chainId: '0x9999', chainName: 'Evil Chain', rpcUrls: [rpcUrl] }],
+    });
+    assert.equal(response.ok, false, `Expected rejection for rpcUrl: ${rpcUrl}`);
+  }
+});
+
+test('WALLET-H2: wallet_addEthereumChain accepts https and localhost http URLs', async () => {
+  txCounter = 0;
+  resetAlarmState();
+  await handleMessage({ type: 'RESET_WALLET' });
+  await handleMessage({ type: 'CREATE_WALLET', password: 'correct horse battery' });
+
+  const approvalsBeforeConnect = createdWindows.length;
+  const connectPromise = handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://good.example',
+    method: 'eth_requestAccounts',
+    params: [],
+  });
+  await resolveLatestApproval(true, approvalsBeforeConnect);
+  await connectPromise;
+
+  const approvalsBeforeAdd = createdWindows.length;
+  const addPromise = handleMessage({
+    type: 'DAPP_REQUEST',
+    origin: 'https://good.example',
+    method: 'wallet_addEthereumChain',
+    params: [{ chainId: '0xabcd', chainName: 'Good Chain', rpcUrls: ['https://rpc.good.example'] }],
+  });
+  await resolveLatestApproval(true, approvalsBeforeAdd);
+  const result = await addPromise;
+  assert.equal(result, null);
+});
+
+test('WALLET-M2: privileged messages from content scripts are blocked', async () => {
+  const privilegedTypes = ['EXPORT_KEYSTORE', 'SEND_TX', 'UNLOCK_WALLET', 'CREATE_WALLET',
+    'IMPORT_KEYSTORE', 'RESET_WALLET'];
+
+  for (const type of privilegedTypes) {
+    const response = await new Promise((resolve) => {
+      // Simulate a content script sender by providing a sender with .tab set
+      listeners.onMessage[0]({ type }, { tab: { id: 1 } }, resolve);
+    });
+    assert.equal(response.ok, false, `${type} should be blocked from content scripts`);
+    assert.equal(response.error, 'Unauthorized', `${type} should return Unauthorized`);
+  }
 });
 
 }); // describe('background e2e')

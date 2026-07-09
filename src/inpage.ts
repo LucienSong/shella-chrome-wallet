@@ -53,7 +53,11 @@ class ShellaInpageProvider {
   }
 
   async request({ method, params = [] }: ProviderRequestArgs): Promise<unknown> {
-    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    // WALLET-L1: use crypto.getRandomValues for request correlation IDs instead
+    // of Math.random() to prevent predictable-ID injection attacks.
+    const idBytes = new Uint8Array(16);
+    crypto.getRandomValues(idBytes);
+    const id = Array.from(idBytes, (b) => b.toString(16).padStart(2, '0')).join('');
     const result = await new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       window.postMessage({ target: REQUEST_TARGET, id, method, params }, window.location.origin);

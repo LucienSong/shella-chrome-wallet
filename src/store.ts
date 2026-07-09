@@ -14,7 +14,7 @@ import type {
 
 export const KNOWN_NETWORKS: Record<string, Network> = {
   devnet: { name: 'Shell Devnet', chainId: 424242, rpcUrl: 'http://127.0.0.1:8545' },
-  testnet: { name: 'Shell Testnet', chainId: 12345, rpcUrl: 'https://rpc.testnet.shell.network' },
+  testnet: { name: 'Shell Testnet', chainId: 10, rpcUrl: 'https://rpc.testnet.shell.network' },
   mainnet: { name: 'Shell Mainnet', chainId: 100000, rpcUrl: 'https://rpc.mainnet.shell.network' },
 };
 
@@ -51,7 +51,7 @@ function normalizeConnectedSites(value: unknown): { sites: ConnectedSitePermissi
     return [{
       origin: candidate.origin,
       accounts: Array.isArray(candidate.accounts)
-        ? candidate.accounts.filter((item): item is `0x${string}` => typeof item === 'string' && item.startsWith('0x'))
+        ? candidate.accounts.filter((item): item is string => typeof item === 'string' && /^0x[0-9a-fA-F]{64}$/.test(item))
         : [],
       chainId: typeof candidate.chainId === 'number' ? candidate.chainId : DEFAULT_NETWORK.chainId,
       grantedAt: typeof candidate.grantedAt === 'number' ? candidate.grantedAt : Date.now(),

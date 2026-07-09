@@ -4,12 +4,12 @@ Chrome wallet for [Shell Chain](https://github.com/LucienSong/shell-chain) — q
 
 ## Features
 
-- 🔐 **ML-DSA-65 key management** — generate or import post-quantum keypairs; addresses in `pq1...` bech32m format
+- 🔐 **ML-DSA-65 key management** — generate or import post-quantum keypairs; addresses in canonical Shell format (`0x` + 64 lowercase hex, BLAKE3-derived)
 - 🔑 **Password-protected keystore** — argon2id KDF + xchacha20-poly1305 encryption; compatible with Shell CLI keystore format
 - 🔒 **Auto-lock** — configurable inactivity timeout via chrome.alarms; unlocked signer stays only in service-worker memory and browser restart re-locks the wallet
 - 💸 **Send transactions** — input recipient + amount → build → sign → broadcast via shell-sdk
 - 📥 **Receive** — display full address with one-click copy
-- 📜 **Transaction history** — query `shell_getTransactionsByAddress` and display recent activity
+- 📜 **Transaction history** — query `shell_getTransactionsByAddress`, display reward-aware Shell tx labels, and preserve STARK reward metadata from address history summaries
 - 🌐 **Multi-network** — switch between devnet / testnet / mainnet or configure a custom RPC URL
 - 🔌 **dApp connectivity foundation** — injected `window.shella` + EIP-1193-compatible `window.ethereum` bridge for connect / read-only RPC / chain switching
 - ⚡ **Manifest V3** — service worker background, strict CSP, no eval
@@ -36,7 +36,7 @@ dist/                  Built extension (load as unpacked)
 ## Development
 
 ```bash
-# Requires shell-sdk to be checked out at ../shell-sdk (sibling directory)
+# Local development pulls shell-sdk via npm or a local file path; see package.json
 npm install
 npm run build        # esbuild → dist/popup.js + dist/background.js
 npm run build:prod   # minified production bundle

@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.22.0] — 2026-05-06
+
+### Added
+- `decodedInput` field in `WalletTxRecord` with decoded proof amendment payload
+  (`layer`, `blockNumber`, `startBlock`, `endBlock`, `nSigs`, `compressedSize`,
+  `originalSize`, `settlementTxHash`) for `starkReward` transactions (v0.22+)
+
+### Changed
+- `background.ts`: maps `decodedInput` from remote tx data for `starkReward` txs
+- Aligns with shell-chain v0.22.0 and shell-sdk v0.8.0
+
+## [0.20.0] — 2026-05-06
+
+### Changed
+- Preserve Shell reward metadata returned by address-history RPC summaries in wallet transaction records.
+- Display reward-aware history labels for block gas rewards, STARK rewards, AA batches, contract creates/calls, and transfers.
+- Align extension release metadata with package version `0.20.0`.
+
+## [0.19.0] — 2026-04-26
+
+### Changed
+- Compatibility with `shell-chain v0.19.0` and `shell-sdk v0.5.0` (AA Phase 2: Contract Paymaster, Session Keys, Guardian Recovery).
+- No new wallet UI in this version. AA Phase 2 UX (batch signing, session key flows, guardian recovery) is tracked in the deferred roadmap.
+
 ## [0.18.0] — 2026-04-24
 
 ### Added
