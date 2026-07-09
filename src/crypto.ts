@@ -9,6 +9,8 @@
 
 import { argon2idAsync } from '@noble/hashes/argon2.js';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { deriveShellAddressFromPublicKey } from 'shell-sdk/address';
+import { SIGNATURE_TYPE_IDS, signatureTypeFromKeyType } from 'shell-sdk/signer';
 import type { ShellEncryptedKey } from 'shell-sdk/types';
 
 // Default argon2id parameters (balanced security/performance for browser context)
@@ -47,6 +49,40 @@ async function deriveKey(
   });
 }
 
+function algorithmIdFromKeyType(keyType: string): number {
+  return SIGNATURE_TYPE_IDS[signatureTypeFromKeyType(keyType)];
+}
+
+function validateKeystoreAddress(ek: ShellEncryptedKey, publicKey: Uint8Array): void {
+  let algorithmId: number;
+  try {
+    algorithmId = algorithmIdFromKeyType(ek.key_type);
+  } catch {
+    return;
+  }
+  const expected = deriveShellAddressFromPublicKey(publicKey, algorithmId);
+  if (ek.address.toLowerCase() !== expected) {
+    throw new Error('Keystore address does not match public key');
+  }
+}
+
+function expectedLegacySecretKeyLength(keyType: string): number | null {
+  try {
+    const algorithmId = algorithmIdFromKeyType(keyType);
+    switch (algorithmId) {
+      case 0:
+      case 1:
+        return 4032;
+      case 2:
+        return 128;
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Encrypt a PQ key pair as a Shell-compatible keystore JSON.
  *
@@ -69,10 +105,13 @@ export async function createKeystore(
 
   const derivedKey = await deriveKey(password, salt, params);
 
-  // Plaintext layout: [secretKey || publicKey]
-  const plaintext = new Uint8Array(secretKey.length + publicKey.length);
-  plaintext.set(secretKey, 0);
-  plaintext.set(publicKey, secretKey.length);
+  const expectedAddress = deriveShellAddressFromPublicKey(publicKey, algorithmIdFromKeyType(keyType));
+  if (address.toLowerCase() !== expectedAddress) {
+    throw new Error('Keystore address does not match public key');
+  }
+
+  // Canonical Shell keystore ciphertext contains only the secret key.
+  const plaintext = secretKey.slice();
 
   const cipher = xchacha20poly1305(derivedKey, nonce);
   const ciphertext = cipher.encrypt(plaintext);
@@ -135,20 +174,30 @@ export async function decryptKeystore(
     derivedKey.fill(0);
   }
 
-  const pubkeyLen = storedPubkey.length;
-  const skLen = plaintext.length - pubkeyLen;
-  if (skLen <= 0) {
+  if (plaintext.length === 0) {
     plaintext.fill(0);
     throw new Error('Keystore payload too short');
   }
 
-  const secretKey = plaintext.slice(0, skLen);
-  const derivedPubkey = plaintext.slice(skLen);
+  let secretKey: Uint8Array;
+  const legacySecretKeyLength = expectedLegacySecretKeyLength(ek.key_type);
+  if (
+    legacySecretKeyLength !== null &&
+    plaintext.length === legacySecretKeyLength + storedPubkey.length &&
+    plaintext.slice(legacySecretKeyLength).every((b, i) => b === storedPubkey[i])
+  ) {
+    // Backward compatibility for older wallet exports that encrypted [sk || pk].
+    secretKey = plaintext.slice(0, plaintext.length - storedPubkey.length);
+  } else {
+    secretKey = plaintext.slice();
+  }
   plaintext.fill(0);
 
-  if (!derivedPubkey.every((b, i) => b === storedPubkey[i])) {
+  try {
+    validateKeystoreAddress(ek, storedPubkey);
+  } catch (err) {
     secretKey.fill(0);
-    throw new Error('Public key mismatch — wrong password or corrupt keystore');
+    throw err;
   }
 
   return { secretKey, publicKey: storedPubkey };

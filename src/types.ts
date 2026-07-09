@@ -80,6 +80,7 @@ export interface WalletSnapshot {
   locked: boolean;
   wallet: WalletState;
   primaryAccount: StoredAccount | null;
+  activeAddress: string | null;
   balance: {
     raw: string;
     formatted: string;
@@ -108,6 +109,7 @@ export interface SendTransactionParams {
   gasLimit?: number;
   maxFeePerGas?: number;
   maxPriorityFeePerGas?: number;
+  expectedChainId?: number;
 }
 
 export interface DappRequestMessage {

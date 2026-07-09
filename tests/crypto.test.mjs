@@ -6,15 +6,21 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 const { createKeystore, decryptKeystore } = await import('../dist/crypto.js');
+const { deriveShellAddressFromPublicKey } = await import('shell-sdk/address');
+
+function addressFor(publicKey) {
+  return deriveShellAddressFromPublicKey(publicKey, 1);
+}
 
 describe('crypto', () => {
   test('createKeystore returns a well-formed keystore object', async () => {
     const sk = new Uint8Array(32).fill(0x11);
     const pk = new Uint8Array(32).fill(0x22);
-    const ks = await createKeystore(sk, pk, 'password12345', 'pq1testaddress', 'mldsa65');
+    const address = addressFor(pk);
+    const ks = await createKeystore(sk, pk, 'password12345', address, 'mldsa65');
 
     assert.equal(ks.version, 1);
-    assert.equal(ks.address, 'pq1testaddress');
+    assert.equal(ks.address, address);
     assert.equal(ks.key_type, 'mldsa65');
     assert.equal(ks.kdf, 'argon2id');
     assert.equal(ks.cipher, 'xchacha20-poly1305');
@@ -29,7 +35,7 @@ describe('crypto', () => {
     const pk = new Uint8Array(32);
     for (let i = 0; i < 32; i++) { sk[i] = i; pk[i] = 255 - i; }
 
-    const ks = await createKeystore(sk, pk, 'strongpassword1', 'pq1abc');
+    const ks = await createKeystore(sk, pk, 'strongpassword1', addressFor(pk));
     const result = await decryptKeystore(ks, 'strongpassword1');
 
     assert.deepEqual(Array.from(result.secretKey), Array.from(sk));
@@ -39,7 +45,7 @@ describe('crypto', () => {
   test('decryptKeystore rejects wrong password with safe error', async () => {
     const sk = new Uint8Array(16).fill(0xab);
     const pk = new Uint8Array(16).fill(0xcd);
-    const ks = await createKeystore(sk, pk, 'correctpassword', 'pq1addr');
+    const ks = await createKeystore(sk, pk, 'correctpassword', addressFor(pk));
 
     await assert.rejects(
       () => decryptKeystore(ks, 'wrongpassword!'),
@@ -55,16 +61,39 @@ describe('crypto', () => {
   test('two keystores from same key have different ciphertexts (random nonce/salt)', async () => {
     const sk = new Uint8Array(8).fill(1);
     const pk = new Uint8Array(8).fill(2);
-    const ks1 = await createKeystore(sk, pk, 'samepassword1', 'pq1x');
-    const ks2 = await createKeystore(sk, pk, 'samepassword1', 'pq1x');
+    const address = addressFor(pk);
+    const ks1 = await createKeystore(sk, pk, 'samepassword1', address);
+    const ks2 = await createKeystore(sk, pk, 'samepassword1', address);
     assert.notEqual(ks1.ciphertext, ks2.ciphertext, 'each keystore should use a fresh nonce');
   });
 
   test('decryptKeystore accepts JSON string input', async () => {
     const sk = new Uint8Array(8).fill(5);
     const pk = new Uint8Array(8).fill(6);
-    const ks = await createKeystore(sk, pk, 'pass12345678', 'pq1y');
+    const ks = await createKeystore(sk, pk, 'pass12345678', addressFor(pk));
     const result = await decryptKeystore(JSON.stringify(ks), 'pass12345678');
     assert.deepEqual(Array.from(result.secretKey), Array.from(sk));
+  });
+
+  test('decryptKeystore does not truncate canonical secret keys that end with the public key', async () => {
+    const pk = new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]);
+    const sk = new Uint8Array([0x01, 0x02, 0x03, 0x04, ...pk]);
+    const ks = await createKeystore(sk, pk, 'pass12345678', addressFor(pk));
+
+    const result = await decryptKeystore(ks, 'pass12345678');
+
+    assert.deepEqual(Array.from(result.secretKey), Array.from(sk));
+  });
+
+  test('decryptKeystore still imports unknown future key_type strings', async () => {
+    const sk = new Uint8Array(8).fill(7);
+    const pk = new Uint8Array(8).fill(8);
+    const ks = await createKeystore(sk, pk, 'pass12345678', addressFor(pk));
+    ks.key_type = 'future-pq-algorithm';
+
+    const result = await decryptKeystore(ks, 'pass12345678');
+
+    assert.deepEqual(Array.from(result.secretKey), Array.from(sk));
+    assert.deepEqual(Array.from(result.publicKey), Array.from(pk));
   });
 });

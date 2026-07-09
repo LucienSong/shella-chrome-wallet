@@ -51,7 +51,9 @@ function normalizeConnectedSites(value: unknown): { sites: ConnectedSitePermissi
     return [{
       origin: candidate.origin,
       accounts: Array.isArray(candidate.accounts)
-        ? candidate.accounts.filter((item): item is string => typeof item === 'string' && /^0x[0-9a-fA-F]{64}$/.test(item))
+        ? candidate.accounts
+          .filter((item): item is string => typeof item === 'string' && /^0x[0-9a-fA-F]{64}$/.test(item))
+          .map((item) => item.toLowerCase())
         : [],
       chainId: typeof candidate.chainId === 'number' ? candidate.chainId : DEFAULT_NETWORK.chainId,
       grantedAt: typeof candidate.grantedAt === 'number' ? candidate.grantedAt : Date.now(),
@@ -208,4 +210,13 @@ export async function clearAllData(): Promise<void> {
   await chrome.storage.local.clear();
   await chrome.storage.session.clear();
   await initStore();
+}
+
+export async function getLastActiveAddress(): Promise<string | null> {
+  const { lastActiveAddress } = await chrome.storage.local.get('lastActiveAddress');
+  return typeof lastActiveAddress === 'string' ? lastActiveAddress : null;
+}
+
+export async function setLastActiveAddress(address: string): Promise<void> {
+  await chrome.storage.local.set({ lastActiveAddress: address });
 }

@@ -18,9 +18,12 @@ function makeEl(id = '') {
     style: { display: '' },
     value: '',
     files: null,
+    children: [],
     _listeners: {},
     addEventListener(ev, fn) { this._listeners[ev] = fn; },
     appendChild(child) {
+      this.children.push(child);
+      if (child.id) domElements.set(child.id, child);
       const attrs = [
         child.id ? ` id="${child.id}"` : '',
         child.className ? ` class="${child.className}"` : '',

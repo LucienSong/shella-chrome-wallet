@@ -14,19 +14,21 @@ import { defineChain, parseEther } from 'viem';
 import { createKeystore, decryptKeystore } from './crypto.js';
 import {
   KNOWN_NETWORKS,
-  addAccount,
+  addAccount as addStoredAccount,
   addConnectedSite,
   clearAllData,
   clearSessionState,
   getAccounts,
   getAutoLockMinutes,
   getConnectedSites,
+  getLastActiveAddress,
   getNetwork,
   getTxQueue,
   getWalletState,
   initStore,
   removeConnectedSite,
   setAutoLockMinutes,
+  setLastActiveAddress,
   setNetwork,
   setSessionState,
   setTxQueue,
@@ -69,7 +71,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  currentSigner = null;
+  disposeCurrentSigner();
   await clearSessionState();
   await pollPendingTransactions();
 });
@@ -128,9 +130,19 @@ async function scheduleTxPolling(): Promise<void> {
 }
 
 async function lockWallet(): Promise<void> {
-  currentSigner = null;
+  disposeCurrentSigner();
   await clearSessionState();
   chrome.alarms.clear(AUTO_LOCK_ALARM);
+}
+
+function disposeCurrentSigner(): void {
+  currentSigner?.dispose();
+  currentSigner = null;
+}
+
+function replaceCurrentSigner(signer: ShellSigner): void {
+  disposeCurrentSigner();
+  currentSigner = signer;
 }
 
 export async function handleMessage(msg: { type: string; [key: string]: unknown }): Promise<unknown> {
@@ -140,7 +152,11 @@ export async function handleMessage(msg: { type: string; [key: string]: unknown 
     case 'IMPORT_KEYSTORE':
       return importKeystore(requireString(msg.keystoreJson, 'keystoreJson'), requirePassword(msg.password));
     case 'UNLOCK_WALLET':
-      return unlockWallet(requirePassword(msg.password));
+      return unlockWallet(requirePassword(msg.password), typeof msg.address === 'string' ? msg.address : undefined);
+    case 'ADD_ACCOUNT':
+      return createAdditionalAccount(requirePassword(msg.password));
+    case 'SWITCH_ACCOUNT':
+      return unlockWallet(requirePassword(msg.password), requireString(msg.address, 'address'));
     case 'LOCK_WALLET':
       await lockWallet();
       return { ok: true };
@@ -169,9 +185,9 @@ export async function handleMessage(msg: { type: string; [key: string]: unknown 
       await setNetwork(validateNetwork(msg.network));
       return { ok: true };
     case 'EXPORT_KEYSTORE': {
-      const accounts = await getAccounts();
-      if (accounts.length === 0) throw new Error('No wallet to export');
-      return { keystoreJson: accounts[0].keystoreJson };
+      const active = await getActiveAccount();
+      if (!active) throw new Error('No wallet to export');
+      return { keystoreJson: active.keystoreJson };
     }
     case 'RESET_WALLET':
       await lockWallet();
@@ -223,13 +239,14 @@ async function createWallet(password: string): Promise<{ pqAddress: string }> {
 
   const keystore = await createKeystore(sk, pk, password, pqAddress, 'mldsa65');
   const account: StoredAccount = { pqAddress, keystoreJson: JSON.stringify(keystore) };
-  await addAccount(account);
+  await addStoredAccount(account);
 
-  currentSigner = signer;
+  replaceCurrentSigner(signer);
   await setSessionState({
     unlockedPqAddress: pqAddress,
     unlockedAt: Date.now(),
   });
+  await setLastActiveAddress(pqAddress);
   await scheduleAutoLock();
   sk.fill(0); // zero ephemeral local copy; adapter holds its own copy
 
@@ -250,29 +267,74 @@ async function importKeystore(
   const pqAddress = signer.getAddress();
 
   const account: StoredAccount = { pqAddress, keystoreJson: JSON.stringify(parsed) };
-  await addAccount(account);
+  await addStoredAccount(account);
 
-  currentSigner = signer;
+  replaceCurrentSigner(signer);
   await setSessionState({ unlockedPqAddress: pqAddress, unlockedAt: Date.now() });
+  await setLastActiveAddress(pqAddress);
   await scheduleAutoLock();
   secretKey.fill(0); // zero ephemeral local copy; adapter holds its own copy
 
   return { pqAddress };
 }
 
-async function unlockWallet(password: string): Promise<{ ok: boolean; pqAddress?: string }> {
+async function createAdditionalAccount(password: string): Promise<{ pqAddress: string }> {
+  const { publicKey: pk, secretKey: sk } = generateMlDsa65KeyPair();
+  let signer: ShellSigner | null = null;
+  try {
+    const adapter = MlDsa65Adapter.fromKeyPair(pk, sk);
+    signer = new ShellSigner('MlDsa65', adapter);
+    const pqAddress = signer.getAddress();
+
+    const keystore = await createKeystore(sk, pk, password, pqAddress, 'mldsa65');
+    await addStoredAccount({ pqAddress, keystoreJson: JSON.stringify(keystore) });
+
+    return { pqAddress };
+  } finally {
+    signer?.dispose();
+    sk.fill(0);
+  }
+}
+
+async function getActiveAccount(): Promise<StoredAccount | null> {
+  const accounts = await getAccounts();
+  if (accounts.length === 0) return null;
+
+  // When unlocked, the signer address is authoritative.
+  if (currentSigner) {
+    const addr = currentSigner.getAddress();
+    const match = accounts.find(a => a.pqAddress === addr);
+    if (match) return match;
+  }
+
+  // Fall back to last persisted active address (survives lock).
+  const lastAddr = await getLastActiveAddress();
+  if (lastAddr) {
+    const match = accounts.find(a => a.pqAddress === lastAddr);
+    if (match) return match;
+  }
+
+  return accounts[0];
+}
+
+async function unlockWallet(password: string, address?: string): Promise<{ ok: boolean; pqAddress?: string }> {
   const accounts = await getAccounts();
   if (accounts.length === 0) throw new Error('No wallet found');
 
-  const account = accounts[0];
+  const account = address != null
+    ? accounts.find(a => a.pqAddress === address)
+    : accounts[0];
+  if (!account) throw new Error('Account not found');
+
   const { secretKey, publicKey } = await decryptKeystore(account.keystoreJson, password);
 
   // WALLET-H1: pass an owned copy into the adapter so that zeroing secretKey below
   // does not corrupt the live signer's key buffer.
   const adapter = MlDsa65Adapter.fromKeyPair(publicKey, secretKey.slice());
-  currentSigner = new ShellSigner('MlDsa65', adapter);
+  replaceCurrentSigner(new ShellSigner('MlDsa65', adapter));
 
   await setSessionState({ unlockedPqAddress: account.pqAddress, unlockedAt: Date.now() });
+  await setLastActiveAddress(account.pqAddress);
   await scheduleAutoLock();
   secretKey.fill(0); // zero ephemeral local copy; adapter holds its own copy
 
@@ -281,6 +343,7 @@ async function unlockWallet(password: string): Promise<{ ok: boolean; pqAddress?
 
 async function getWalletSnapshot(): Promise<WalletSnapshot> {
   const wallet = await getWalletState();
+  const activeAccount = await getActiveAccount();
   const primaryAccount = wallet.accounts[0] ?? null;
   const locked = currentSigner === null;
 
@@ -289,6 +352,7 @@ async function getWalletSnapshot(): Promise<WalletSnapshot> {
       locked,
       wallet,
       primaryAccount: null,
+      activeAddress: null,
       balance: null,
       nonce: null,
       detectedChainId: null,
@@ -298,9 +362,10 @@ async function getWalletSnapshot(): Promise<WalletSnapshot> {
 
   try {
     const provider = buildProvider(wallet.network);
+    const queryAddress = activeAccount?.pqAddress ?? primaryAccount.pqAddress;
     const [balance, nonce, detectedChainId, nodeInfo] = await Promise.all([
-      provider.client.getBalance({ address: asPqAddress(primaryAccount.pqAddress, 'getBalance') }),
-      provider.client.getTransactionCount({ address: asPqAddress(primaryAccount.pqAddress, 'getTransactionCount') }),
+      provider.client.getBalance({ address: asPqAddress(queryAddress, 'getBalance') }),
+      provider.client.getTransactionCount({ address: asPqAddress(queryAddress, 'getTransactionCount') }),
       provider.client.getChainId(),
       getNodeInfoFromNode(wallet.network.rpcUrl).catch(() => null),
     ]);
@@ -308,6 +373,7 @@ async function getWalletSnapshot(): Promise<WalletSnapshot> {
       locked,
       wallet,
       primaryAccount,
+      activeAddress: activeAccount?.pqAddress ?? null,
       balance: {
         raw: balance.toString(),
         formatted: formatEther(balance),
@@ -321,6 +387,7 @@ async function getWalletSnapshot(): Promise<WalletSnapshot> {
       locked,
       wallet,
       primaryAccount,
+      activeAddress: activeAccount?.pqAddress ?? null,
       balance: null,
       nonce: null,
       detectedChainId: null,
@@ -340,6 +407,9 @@ async function sendTransaction(params: SendTransactionParams): Promise<{ txHash:
   if (!currentSigner) throw new Error('Wallet is locked');
 
   const network = await getNetwork();
+  if (params.expectedChainId !== undefined && params.expectedChainId !== network.chainId) {
+    throw new Error(`Network changed during approval: expected ${params.expectedChainId}, got ${network.chainId}`);
+  }
   const provider = buildProvider(network);
   const from = currentSigner.getAddress();
   const to = normalizeRecipient(params.to);
@@ -491,14 +561,13 @@ async function getNodeInfoFromNode(rpcUrl: string): Promise<WalletNodeInfo | nul
 async function handleDappRequest(message: DappRequestMessage): Promise<unknown> {
   const origin = normalizeOrigin(message.origin);
   const network = await getNetwork();
-  const accounts = await getAccounts();
-  const primaryAccount = accounts[0] ?? null;
+  const activeAccount = await getActiveAccount();
   const permission = await getConnectedPermission(origin);
   const provider = buildProvider(network);
 
   switch (message.method) {
     case 'eth_requestAccounts': {
-      if (!primaryAccount) throw new Error('No wallet found');
+      if (!activeAccount) throw new Error('No wallet found');
       if (!currentSigner) throw new Error('Wallet is locked');
       if (permission?.accounts.length) {
         await addConnectedSite(buildConnectedSite(origin, permission.accounts[0], network.chainId, permission.grantedAt));
@@ -509,13 +578,13 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
         origin,
         createdAt: Date.now(),
         payload: {
-          pqAddress: primaryAccount.pqAddress,
+          pqAddress: activeAccount.pqAddress,
           chainId: network.chainId,
           networkName: network.name,
         },
       });
       if (!approved) throw new Error('Request rejected by user');
-      const granted = buildConnectedSite(origin, primaryAccount.pqAddress, network.chainId, permission?.grantedAt);
+      const granted = buildConnectedSite(origin, activeAccount.pqAddress, network.chainId, permission?.grantedAt);
       await addConnectedSite(granted);
       return granted.accounts;
     }
@@ -537,11 +606,15 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
     case 'eth_sendTransaction': {
       ensureConnected(permission, origin);
       if (!currentSigner) throw new Error('Wallet is locked');
+      const permittedAccount = permission.accounts[0];
+      if (!permittedAccount) {
+        throw new Error('No permitted account for this site');
+      }
       const [tx] = normalizeArrayParams(message.params);
       if (!tx || typeof tx !== 'object') throw new Error('eth_sendTransaction requires a transaction object');
       const candidate = tx as Record<string, unknown>;
       const from = optionalString(candidate.from);
-      if (from && from !== permission.accounts[0]) {
+      if (from && from.toLowerCase() !== permittedAccount.toLowerCase()) {
         throw new Error('Requested from account is not permitted for this site');
       }
       const request = {
@@ -557,7 +630,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
         origin,
         createdAt: Date.now(),
         payload: {
-          account: permission.accounts[0],
+          account: permittedAccount,
           to: request.to,
           value: request.value,
           data: request.data ?? '0x',
@@ -565,7 +638,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
         },
       });
       if (!approved) throw new Error('Request rejected by user');
-      return sendTransaction(request);
+      return sendTransaction({ ...request, expectedChainId: network.chainId });
     }
     case 'eth_call': {
       const [tx] = normalizeArrayParams(message.params);
@@ -605,7 +678,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
       });
       if (!approved) throw new Error('Request rejected by user');
       await setNetwork(nextNetwork);
-      await addConnectedSite(buildConnectedSite(origin, permission.accounts[0], nextNetwork.chainId, permission.grantedAt));
+      await addConnectedSite(buildConnectedSite(origin, activeAccount?.pqAddress ?? permission.accounts[0], nextNetwork.chainId, permission.grantedAt));
       return null;
     }
     case 'wallet_addEthereumChain': {
@@ -639,13 +712,14 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
       });
       if (!approved) throw new Error('Request rejected by user');
       await setNetwork(nextNetwork);
-      if (primaryAccount) {
-        await addConnectedSite(buildConnectedSite(origin, primaryAccount.pqAddress, nextNetwork.chainId, permission?.grantedAt));
+      if (activeAccount) {
+        await addConnectedSite(buildConnectedSite(origin, activeAccount.pqAddress, nextNetwork.chainId, permission?.grantedAt));
       }
       return null;
     }
     case 'shella_getPqAddress':
-      return primaryAccount?.pqAddress ?? null;
+      ensureConnected(permission, origin);
+      return activeAccount?.pqAddress ?? null;
     case 'shella_sendPqTransaction': {
       ensureConnected(permission, origin);
       if (!currentSigner) throw new Error('Wallet is locked');
@@ -653,7 +727,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
       if (!tx || typeof tx !== 'object') throw new Error('shella_sendPqTransaction requires a transaction object');
       const candidate = tx as Record<string, unknown>;
       const from = optionalString(candidate.from);
-      if (from && from !== primaryAccount?.pqAddress) {
+      if (from && from !== activeAccount?.pqAddress) {
         throw new Error('Requested pq sender does not match the unlocked wallet');
       }
       const request = {
@@ -669,7 +743,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
         origin,
         createdAt: Date.now(),
         payload: {
-          account: primaryAccount?.pqAddress ?? null,
+          account: activeAccount?.pqAddress ?? null,
           to: request.to,
           value: request.value,
           data: request.data ?? '0x',
@@ -677,7 +751,7 @@ async function handleDappRequest(message: DappRequestMessage): Promise<unknown> 
         },
       });
       if (!approved) throw new Error('Request rejected by user');
-      return sendTransaction(request);
+      return sendTransaction({ ...request, expectedChainId: network.chainId });
     }
     default:
       throw new Error(`Unsupported dApp method: ${message.method}`);
@@ -703,7 +777,7 @@ function buildConnectedSite(
   const now = Date.now();
   return {
     origin,
-    accounts: [pqAddress],
+    accounts: [pqAddress.toLowerCase()],
     chainId,
     grantedAt,
     lastUsedAt: now,
@@ -760,6 +834,7 @@ function resolveApprovalRequest(requestId: string, approved: boolean): { ok: tru
   if (!pending) throw new Error('Approval request not found');
   if (Date.now() - pending.request.createdAt > APPROVAL_TTL_MS) {
     pendingApprovals.delete(requestId);
+    pending.resolve(false);
     throw new Error('Approval request has expired');
   }
   pendingApprovals.delete(requestId);
@@ -1014,6 +1089,7 @@ function toSafeErrorMessage(err: unknown): string {
     message === 'Password must be at least 8 characters' ||
     message === 'Incorrect password or corrupted keystore' ||
     message === 'Public key mismatch — wrong password or corrupt keystore' ||
+    message === 'Keystore address does not match public key' ||
     message === 'Keystore JSON is invalid' ||
     message === 'Keystore payload must be a JSON object' ||
     message.startsWith('Keystore is missing required field:') ||
