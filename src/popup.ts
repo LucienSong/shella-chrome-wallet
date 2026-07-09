@@ -766,14 +766,14 @@ function renderAccounts(): string {
       <div class="account-item${isActive ? ' account-item-active' : ''}">
         <div class="account-item-info">
           <span class="account-label">Account ${i + 1}</span>
-          <span class="monospace account-address">${truncate(acct.pqAddress)}</span>
+          <span class="monospace account-address">${escapeHtml(truncate(acct.pqAddress))}</span>
           ${isActive ? '<span class="badge badge-active">Active</span>' : ''}
         </div>
         <div class="account-item-actions">
           ${!isActive
-            ? `<button class="btn-secondary btn-switch-account" data-address="${escapeHtml(acct.pqAddress)}">Switch</button>`
+            ? `<button class="btn-secondary btn-switch-account" data-address="${escapeAttr(acct.pqAddress)}">Switch</button>`
             : ''}
-          <button class="btn-secondary btn-copy-account" data-address="${escapeHtml(acct.pqAddress)}">Copy</button>
+          <button class="btn-secondary btn-copy-account" data-address="${escapeAttr(acct.pqAddress)}">Copy</button>
         </div>
       </div>
     `;

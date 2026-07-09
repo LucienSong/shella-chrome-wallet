@@ -678,7 +678,6 @@ describe('multi-account', () => {
     assert.equal(unlocked.pqAddress, second.pqAddress, 'Must unlock the specified account');
   });
 });
-
 describe('HD wallet', () => {
   const PASSWORD = 'hdwallet-test-password!';
   // Standard BIP-39 test mnemonic ("abandon" x23 + "art").
