@@ -29,6 +29,8 @@ function createStorageArea() {
 
 const localArea = createStorageArea();
 const sessionArea = createStorageArea();
+const SHELL_ADDRESS_A = `0x${'a'.repeat(64)}`;
+const SHELL_ADDRESS_B = `0x${'b'.repeat(64)}`;
 
 globalThis.chrome = {
   storage: { local: localArea, session: sessionArea },
@@ -73,12 +75,12 @@ describe('store', () => {
   });
 
   test('addAccount persists account and deduplicates by pqAddress', async () => {
-    const account = { pqAddress: 'pq1abc', hexAddress: '0x123', keystoreJson: '{}' };
+    const account = { pqAddress: SHELL_ADDRESS_A, keystoreJson: '{}' };
     await addAccount(account);
     await addAccount(account); // duplicate
     const accounts = await getAccounts();
     assert.equal(accounts.length, 1);
-    assert.equal(accounts[0].pqAddress, 'pq1abc');
+    assert.equal(accounts[0].pqAddress, SHELL_ADDRESS_A);
   });
 
   test('setNetwork persists and getNetwork retrieves', async () => {
@@ -146,35 +148,35 @@ describe('store', () => {
   test('connected sites can be added and removed', async () => {
     await addConnectedSite({
       origin: 'https://app.shell.network',
-      accounts: [`0x${'aa'.repeat(32)}`],
+      accounts: [SHELL_ADDRESS_A],
       chainId: 424242,
       grantedAt: 1,
       lastUsedAt: 2,
     });
     await addConnectedSite({
       origin: 'https://dapp.example.com',
-      accounts: [`0x${'bb'.repeat(32)}`],
+      accounts: [SHELL_ADDRESS_B],
       chainId: 12345,
       grantedAt: 3,
       lastUsedAt: 4,
     });
     await addConnectedSite({
       origin: 'https://app.shell.network',
-      accounts: [`0x${'cc'.repeat(32)}`],
+      accounts: [SHELL_ADDRESS_B],
       chainId: 424242,
       grantedAt: 1,
       lastUsedAt: 5,
     }); // replace duplicate by origin
     const sites = await getConnectedSites();
     assert.equal(sites.length, 2);
-    assert.equal(sites.find((site) => site.origin === 'https://app.shell.network').accounts[0], `0x${'cc'.repeat(32)}`);
+    assert.equal(sites.find((site) => site.origin === 'https://app.shell.network').accounts[0], SHELL_ADDRESS_B);
 
     await removeConnectedSite('https://dapp.example.com');
     assert.equal((await getConnectedSites()).length, 1);
   });
 
   test('clearAllData resets everything to defaults', async () => {
-    await addAccount({ pqAddress: 'pq1x', hexAddress: '0x1', keystoreJson: '{}' });
+    await addAccount({ pqAddress: SHELL_ADDRESS_A, keystoreJson: '{}' });
     await setNetwork({ name: 'Shell Testnet', chainId: 12345, rpcUrl: 'https://rpc.testnet.shell.network' });
     await clearAllData();
     const state = await getWalletState();
